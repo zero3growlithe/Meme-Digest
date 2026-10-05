@@ -29,10 +29,7 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
     /// <summary>Guard so a slow scan cannot double-load concurrently.</summary>
     private readonly SemaphoreSlim loadGate = new SemaphoreSlim(1, 1);
 
-    /// <summary>Serializes gallery mutations (cards list + panel children) so keep/discard/draw races cannot double-attach a card.</summary>
-    private readonly SemaphoreSlim galleryMutex = new SemaphoreSlim(1, 1);
-
-    /// <summary>Set while a viewer/batch mutation runs, so the same click cannot re-enter through card events.</summary>
+    /// <summary>Set while a viewer/batch/move mutation runs, so the same logical operation cannot re-enter.</summary>
     private bool isMutatingGallery;
 
     private UserHistory history;
@@ -162,17 +159,11 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
                 return scanner.DrawRandom(eligible, requestedCount, random);
             });
 
-            await galleryMutex.WaitAsync();
-            try
-            {
-                CloseViewer();
-                viewerCardIndex = -1;
-                await RenderGalleryAsync(drawn);
-            }
-            finally
-            {
-                galleryMutex.Release();
-            }
+            // All UI-tree mutation happens synchronously here on the UI thread:
+            // the dispatcher is the gallery lock — no await may carry the mutation across threads.
+            CloseViewer();
+            viewerCardIndex = -1;
+            await RenderGalleryAsync(drawn);
 
             SaveSettings();
 
@@ -207,8 +198,8 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
     // ── Gallery rendering ──
 
-    /// <summary>Builds all cards (must be called while holding galleryMutex — touches galleryCards and GalleryPanel).</summary>
-    private async Task RenderGalleryAsync(List<MediaFileInfo> drawn)
+    /// <summary>Builds all cards. Must run on the UI thread — touches galleryCards and GalleryPanel.</summary>
+    private Task RenderGalleryAsync(List<MediaFileInfo> drawn)
     {
         DisposeAllCardMedia();
         GalleryPanel.Children.Clear();
@@ -226,7 +217,7 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
         GalleryHeaderTextBlock.Text = GalleryHeaderTemplate();
         UpdateExportButtonStates();
-        await Task.CompletedTask;
+        return Task.CompletedTask;
     }
 
     private string GalleryHeaderTemplate()
@@ -332,33 +323,26 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
             return;
         }
 
-        // Slot indexes are re-derived INSIDE the mutex: card layout may have changed while replacements were drawn.
-        await galleryMutex.WaitAsync();
-        try
+        // Synchronous apply on the UI thread: slot indexes are re-derived right here,
+        // after the async scan — no await sits between the check and the write.
+        int replacementIndex = 0;
+        for (int slotIndex = 0; slotIndex < galleryCards.Count && replacementIndex < replacements.Count; slotIndex++)
         {
-            int replacementIndex = 0;
-            for (int slotIndex = 0; slotIndex < galleryCards.Count && replacementIndex < replacements.Count; slotIndex++)
+            if (!galleryCards[slotIndex].IsPlaceholder)
             {
-                if (!galleryCards[slotIndex].IsPlaceholder)
-                {
-                    continue;
-                }
-
-                GalleryCard replacement = new GalleryCard(replacements[replacementIndex], thumbnailService, MaxSelectionCount);
-                replacement.ThumbnailClicked += GalleryCard_ThumbnailClicked;
-                replacement.SelectionChanged += GalleryCard_SelectionChanged;
-                GalleryPanel.Children[slotIndex] = replacement;
-                galleryCards[slotIndex] = replacement;
-                replacementIndex++;
+                continue;
             }
 
-            GalleryHeaderTextBlock.Text = GalleryHeaderTemplate();
-            SetStatus("Replaced " + replacementIndex + " empty slot" + (replacementIndex == 1 ? string.Empty : "s") + " with new random memes.");
+            GalleryCard replacement = new GalleryCard(replacements[replacementIndex], thumbnailService, MaxSelectionCount);
+            replacement.ThumbnailClicked += GalleryCard_ThumbnailClicked;
+            replacement.SelectionChanged += GalleryCard_SelectionChanged;
+            GalleryPanel.Children[slotIndex] = replacement;
+            galleryCards[slotIndex] = replacement;
+            replacementIndex++;
         }
-        finally
-        {
-            galleryMutex.Release();
-        }
+
+        GalleryHeaderTextBlock.Text = GalleryHeaderTemplate();
+        SetStatus("Replaced " + replacementIndex + " empty slot" + (replacementIndex == 1 ? string.Empty : "s") + " with new random memes.");
     }
 
     // ── Viewer ──
@@ -541,36 +525,31 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
             return;
         }
 
+        // Snapshot synchronously, then record history; every UI-tree write below happens
+        // in a synchronous block on the UI thread (the dispatcher is the gallery lock).
+        if (viewerCardIndex < 0 || viewerCardIndex >= galleryCards.Count)
+        {
+            return;
+        }
+
+        GalleryCard card = galleryCards[viewerCardIndex];
+        MediaFileInfo consumedMedia = card.Media;
+
         isMutatingGallery = true;
         try
         {
-            if (viewerCardIndex < 0 || viewerCardIndex >= galleryCards.Count)
-            {
-                return;
-            }
-
-            GalleryCard card = galleryCards[viewerCardIndex];
-            MediaFileInfo consumedMedia = card.Media;
             await RecordHistoryEntryAsync(state, consumedMedia.RelativePath);
 
-            await galleryMutex.WaitAsync();
-            try
-            {
-                CloseViewer();
-                viewerCardIndex = -1;
+            CloseViewer();
+            viewerCardIndex = -1;
 
-                int cardIndex = FindCardIndex(card);
-                if (cardIndex >= 0)
-                {
-                    DisposeCardMedia(card);
-                    GalleryCard placeholder = CreatePlaceholderCard();
-                    galleryCards[cardIndex] = placeholder;
-                    GalleryPanel.Children[cardIndex] = placeholder;
-                }
-            }
-            finally
+            int cardIndex = FindCardIndex(card);
+            if (cardIndex >= 0)
             {
-                galleryMutex.Release();
+                DisposeCardMedia(card);
+                GalleryCard placeholder = CreatePlaceholderCard();
+                galleryCards[cardIndex] = placeholder;
+                GalleryPanel.Children[cardIndex] = placeholder;
             }
 
             RefreshHistorySummary();
@@ -586,6 +565,12 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
     /// <summary>Keep/discard every currently-selected card in one pass (batch buttons in the export toolbar).</summary>
     private async Task MarkSelectedCards(MemeHistoryState state)
     {
+        if (isMutatingGallery)
+        {
+            return;
+        }
+
+        // Snapshot synchronously on the UI thread before any await.
         List<GalleryCard> selectedCards = new List<GalleryCard>();
         foreach (GalleryCard card in galleryCards)
         {
@@ -597,7 +582,7 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
             selectedCards.Add(card);
         }
 
-        if (isMutatingGallery || selectedCards.Count == 0)
+        if (selectedCards.Count == 0)
         {
             return;
         }
@@ -610,26 +595,18 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
                 await RecordHistoryEntryAsync(state, card.Media.RelativePath);
             }
 
-            await galleryMutex.WaitAsync();
-            try
-            {
-                CloseViewer();
-                viewerCardIndex = -1;
+            CloseViewer();
+            viewerCardIndex = -1;
 
-                for (int index = 0; index < galleryCards.Count; index++)
-                {
-                    if (selectedCards.Contains(galleryCards[index]))
-                    {
-                        DisposeCardMedia(galleryCards[index]);
-                        GalleryCard placeholder = CreatePlaceholderCard();
-                        galleryCards[index] = placeholder;
-                        GalleryPanel.Children[index] = placeholder;
-                    }
-                }
-            }
-            finally
+            for (int index = 0; index < galleryCards.Count; index++)
             {
-                galleryMutex.Release();
+                if (selectedCards.Contains(galleryCards[index]))
+                {
+                    DisposeCardMedia(galleryCards[index]);
+                    GalleryCard placeholder = CreatePlaceholderCard();
+                    galleryCards[index] = placeholder;
+                    GalleryPanel.Children[index] = placeholder;
+                }
             }
 
             RefreshHistorySummary();
@@ -1067,16 +1044,7 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
                     await RecordHistoryEntryAsync(MemeHistoryState.Picked, relativePath);
                 }
 
-                await galleryMutex.WaitAsync();
-                try
-                {
-                    RemoveSelectedCards();
-                }
-                finally
-                {
-                    galleryMutex.Release();
-                }
-
+                RemoveSelectedCards();
                 await ReplaceConsumedCardsAsync();
             }
         }
