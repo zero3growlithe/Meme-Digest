@@ -32,6 +32,9 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
     /// <summary>Serializes gallery mutations (cards list + panel children) so keep/discard/draw races cannot double-attach a card.</summary>
     private readonly SemaphoreSlim galleryMutex = new SemaphoreSlim(1, 1);
 
+    /// <summary>Set while a viewer/batch mutation runs, so the same click cannot re-enter through card events.</summary>
+    private bool isMutatingGallery;
+
     private UserHistory history;
 
     private readonly Dictionary<string, bool> selectedByRelativePath = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
