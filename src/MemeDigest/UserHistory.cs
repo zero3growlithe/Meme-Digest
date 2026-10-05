@@ -92,9 +92,9 @@ public sealed class UserHistory
         }
 
         Entries.Clear();
-        foreach (MemeHistoryEntry entry in latestByPath.Values)
+        foreach ((MemeHistoryState State, MemeHistoryEntry Entry) pair in latestByPath.Values)
         {
-            Entries.Add(entry);
+            Entries.Add(pair.Entry);
         }
     }
 
