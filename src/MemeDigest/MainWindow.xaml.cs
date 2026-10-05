@@ -85,6 +85,7 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
     public MainWindow()
     {
         InitializeComponent();
+        SetWindowIconFromResource();
         settings = AppSettings.LoadOrCreate();
         scanner = new MemeLibraryScanner();
         thumbnailService = new ThumbnailService(settings);
@@ -109,6 +110,22 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
     }
 
     // ── Title / status ──
+
+    /// <summary>
+    /// Loads app.ico (embedded by ApplicationIcon) for the title bar/taskbar icon.
+    /// Falls back silently when the resource is absent (e.g. icon file removed).
+    /// </summary>
+    private void SetWindowIconFromResource()
+    {
+        try
+        {
+            Icon = BitmapFrame.Create(new Uri("pack://application:,,,/app.ico"));
+        }
+        catch (Exception)
+        {
+            // No embedded icon — leave the default WPF icon.
+        }
+    }
 
     private void UpdateTitle()
     {

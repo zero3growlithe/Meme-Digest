@@ -1,0 +1,6 @@
+<Project>
+  <!-- Win32 icon: shown on the exe, taskbar and window in Explorer (title bar needs MainWindow.Icon). -->
+  <PropertyGroup>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+  </PropertyGroup>
+</Project>
