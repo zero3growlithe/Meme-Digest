@@ -9,6 +9,7 @@
         Background="#FF14141A"
         WindowStartupLocation="CenterScreen"
         UseLayoutRounding="True"
+        PreviewKeyDown="Window_PreviewKeyDown"
         TextOptions.TextFormattingMode="Display">
     <Window.Resources>
         <Style x:Key="ToolBarButtonStyle" TargetType="Button">
@@ -228,7 +229,7 @@
             </ScrollViewer>
 
             <!-- ── Full-window viewer overlay ── -->
-            <Border x:Name="ViewerOverlay" Background="#F5101016" Visibility="Collapsed" Focusable="True" PreviewKeyDown="ViewerOverlay_PreviewKeyDown">
+            <Border x:Name="ViewerOverlay" Background="#F5101016" Visibility="Collapsed" Focusable="True">
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="*" />

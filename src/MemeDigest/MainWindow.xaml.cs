@@ -1162,38 +1162,19 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
     // ── Keyboard handling ──
 
-    protected override void OnKeyDown(KeyEventArgs eventArgs)
+    /// <summary>
+    /// Window-tunnel handler: PreviewKeyDown starts at the window, so it fires for
+    /// EVERY key regardless of which child holds keyboard focus. This is the single
+    /// routing point for viewer shortcuts — clicking any button/slider in the viewer
+    /// can move focus freely without breaking Enter/Space/arrows.
+    /// </summary>
+    private void Window_PreviewKeyDown(object sender, KeyEventArgs eventArgs)
     {
-        base.OnKeyDown(eventArgs);
         if (ViewerOverlay.Visibility != Visibility.Visible)
         {
             return;
         }
 
-        switch (eventArgs.Key)
-        {
-            case Key.Escape:
-                CloseViewer();
-                eventArgs.Handled = true;
-                break;
-            case Key.Left:
-                StepViewer(-1);
-                eventArgs.Handled = true;
-                break;
-            case Key.Right:
-                StepViewer(1);
-                eventArgs.Handled = true;
-                break;
-        }
-    }
-
-    /// <summary>
-    /// Tunnel handler on the overlay: fires even when focus rests on a viewer button
-    /// (bubbling KeyDown from the window stops at the focused element, which was why
-    /// arrows worked only after clicking a control first).
-    /// </summary>
-    private void ViewerOverlay_PreviewKeyDown(object sender, KeyEventArgs eventArgs)
-    {
         switch (eventArgs.Key)
         {
             case Key.Escape:
@@ -1231,12 +1212,13 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
     private void CopyCurrentViewerMediaToClipboard()
     {
-        if (viewerCardIndex < 0 || viewerCardIndex >= galleryCards.Count)
+        List<GalleryCard> cards = ActiveCards();
+        if (viewerCardIndex < 0 || viewerCardIndex >= cards.Count)
         {
             return;
         }
 
-        string absolutePath = galleryCards[viewerCardIndex].Media.AbsolutePath;
+        string absolutePath = cards[viewerCardIndex].Media.AbsolutePath;
         bool copied = ExportService.CopyFileListToClipboard(new[] { absolutePath });
         SetStatus(copied ? "Copied to clipboard — paste with Ctrl+V." : "Clipboard copy failed (another app may be holding the clipboard).");
     }
@@ -1247,12 +1229,13 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
     /// </summary>
     private void CutCurrentViewerMediaToClipboard()
     {
-        if (viewerCardIndex < 0 || viewerCardIndex >= galleryCards.Count)
+        List<GalleryCard> cards = ActiveCards();
+        if (viewerCardIndex < 0 || viewerCardIndex >= cards.Count)
         {
             return;
         }
 
-        string absolutePath = galleryCards[viewerCardIndex].Media.AbsolutePath;
+        string absolutePath = cards[viewerCardIndex].Media.AbsolutePath;
         try
         {
             System.Windows.DataObject dataObject = new System.Windows.DataObject();
@@ -1276,12 +1259,13 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
     private void ViewerRevealButton_Click(object sender, RoutedEventArgs eventArgs)
     {
-        if (viewerCardIndex < 0 || viewerCardIndex >= galleryCards.Count)
+        List<GalleryCard> cards = ActiveCards();
+        if (viewerCardIndex < 0 || viewerCardIndex >= cards.Count)
         {
             return;
         }
 
-        ExportService.RevealInExplorer(new[] { galleryCards[viewerCardIndex].Media.AbsolutePath });
+        ExportService.RevealInExplorer(new[] { cards[viewerCardIndex].Media.AbsolutePath });
     }
 
     private void ViewerBackdrop_MouseLeftButtonDown(object sender, MouseButtonEventArgs eventArgs)
