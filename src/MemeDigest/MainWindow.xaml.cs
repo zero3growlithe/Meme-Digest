@@ -323,8 +323,8 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
             return;
         }
 
-        // Synchronous apply on the UI thread: slot indexes are re-derived right here,
-        // after the async scan — no await sits between the check and the write.
+        // Update the card list first, then rebuild the panel in one pass — no index-based
+        // writes to Children anywhere (a stale index would double-attach a visual).
         int replacementIndex = 0;
         for (int slotIndex = 0; slotIndex < galleryCards.Count && replacementIndex < replacements.Count; slotIndex++)
         {
@@ -336,13 +336,28 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
             GalleryCard replacement = new GalleryCard(replacements[replacementIndex], thumbnailService, MaxSelectionCount);
             replacement.ThumbnailClicked += GalleryCard_ThumbnailClicked;
             replacement.SelectionChanged += GalleryCard_SelectionChanged;
-            GalleryPanel.Children[slotIndex] = replacement;
             galleryCards[slotIndex] = replacement;
             replacementIndex++;
         }
 
+        RebuildGalleryPanel();
+
         GalleryHeaderTextBlock.Text = GalleryHeaderTemplate();
         SetStatus("Replaced " + replacementIndex + " empty slot" + (replacementIndex == 1 ? string.Empty : "s") + " with new random memes.");
+    }
+
+    /// <summary>
+    /// Rebuilds the gallery panel from galleryCards in a single pass. The only place
+    /// that detaches/attaches visuals for slot replacements — a card can be attached
+    /// exactly once because the source list cannot contain it twice.
+    /// </summary>
+    private void RebuildGalleryPanel()
+    {
+        GalleryPanel.Children.Clear();
+        foreach (GalleryCard card in galleryCards)
+        {
+            GalleryPanel.Children.Add(card);
+        }
     }
 
     // ── Viewer ──
@@ -544,12 +559,13 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
             viewerCardIndex = -1;
 
             int cardIndex = FindCardIndex(card);
+
+            // List update first, then one-pass panel rebuild — never `Children[index] = ...`.
             if (cardIndex >= 0)
             {
                 DisposeCardMedia(card);
-                GalleryCard placeholder = CreatePlaceholderCard();
-                galleryCards[cardIndex] = placeholder;
-                GalleryPanel.Children[cardIndex] = placeholder;
+                galleryCards[cardIndex] = CreatePlaceholderCard();
+                RebuildGalleryPanel();
             }
 
             RefreshHistorySummary();
@@ -598,16 +614,19 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
             CloseViewer();
             viewerCardIndex = -1;
 
+            // Phase 1: replace consumed cards in the list only (no visual tree writes yet).
+            HashSet<GalleryCard> consumedSet = new HashSet<GalleryCard>(selectedCards);
             for (int index = 0; index < galleryCards.Count; index++)
             {
-                if (selectedCards.Contains(galleryCards[index]))
+                if (consumedSet.Contains(galleryCards[index]))
                 {
                     DisposeCardMedia(galleryCards[index]);
-                    GalleryCard placeholder = CreatePlaceholderCard();
-                    galleryCards[index] = placeholder;
-                    GalleryPanel.Children[index] = placeholder;
+                    galleryCards[index] = CreatePlaceholderCard();
                 }
             }
+
+            // Phase 2: rebuild the panel from the list — no index-based writes to Children.
+            RebuildGalleryPanel();
 
             RefreshHistorySummary();
             UpdateExportButtonStates();
@@ -1063,14 +1082,13 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
             if (selectedByRelativePath.TryGetValue(relativePath, out isSelected) && isSelected)
             {
                 DisposeCardMedia(galleryCards[index]);
-                GalleryCard placeholder = CreatePlaceholderCard();
-                galleryCards[index] = placeholder;
-                GalleryPanel.Children[index] = placeholder;
+                galleryCards[index] = CreatePlaceholderCard();
                 selectedByRelativePath.Remove(relativePath);
             }
         }
 
         viewerCardIndex = -1;
+        RebuildGalleryPanel();
         GalleryHeaderTextBlock.Text = GalleryHeaderTemplate();
     }
 
