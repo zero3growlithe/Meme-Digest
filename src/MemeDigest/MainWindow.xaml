@@ -122,6 +122,32 @@
             <Setter Property="BorderBrush" Value="#FF3C3C4E" />
             <Setter Property="CaretBrush" Value="#FFE8E8F0" />
         </Style>
+        <Style x:Key="DarkTabStyle" TargetType="RadioButton">
+            <Setter Property="Foreground" Value="#FF9A9AB0" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Padding" Value="14,6" />
+            <Setter Property="Margin" Value="0,0,4,0" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Focusable" Value="False" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RadioButton">
+                        <Border x:Name="TabBorder" Background="{TemplateBinding Background}" CornerRadius="6,6,0,0" Padding="{TemplateBinding Padding}" BorderBrush="#FF3C3C4E" BorderThickness="1,1,1,0">
+                            <ContentPresenter VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="TabBorder" Property="Background" Value="#FF2E2E3C" />
+                                <Setter Property="Foreground" Value="#FFE8E8F0" />
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="TabBorder" Property="Background" Value="#FF28283A" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </Window.Resources>
 
     <DockPanel>
@@ -143,6 +169,16 @@
 
                 <Button x:Name="SettingsButton" Content="Settings" Style="{StaticResource ToolBarButtonStyle}" Click="SettingsButton_Click" />
             </WrapPanel>
+        </Border>
+
+        <!-- ── Tab bar ── -->
+        <Border DockPanel.Dock="Top" Background="#FF22222C" Padding="12,4" BorderBrush="#FF26262E" BorderThickness="0,0,0,1">
+            <StackPanel Orientation="Horizontal">
+                <RadioButton x:Name="DrawerTabButton" Content="Meme Drawer" GroupName="MainTabs" Style="{StaticResource DarkTabStyle}" Checked="DrawerTabButton_Checked" IsChecked="True" />
+                <RadioButton x:Name="KeptTabButton" Content="Kept Memes" GroupName="MainTabs" Style="{StaticResource DarkTabStyle}" Checked="KeptTabButton_Checked" />
+                <RadioButton x:Name="DiscardedTabButton" Content="Discarded Memes" GroupName="MainTabs" Style="{StaticResource DarkTabStyle}" Checked="DiscardedTabButton_Checked" />
+                <Button x:Name="ResetSelectedButton" Content="♻ Reset selected" Style="{StaticResource ToolBarButtonStyle}" Margin="16,0,0,0" Click="ResetSelectedButton_Click" ToolTip="Remove the selected memes from history so they can be drawn again" Visibility="Collapsed" />
+            </StackPanel>
         </Border>
 
         <!-- ── Export toolbar ── -->
@@ -170,10 +206,24 @@
 
         <!-- ── Content ── -->
         <Grid>
-            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <ScrollViewer x:Name="DrawerTabContent" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                 <StackPanel>
                     <TextBlock x:Name="GalleryHeaderTextBlock" Foreground="#FFB8B8C8" FontSize="14" Margin="14,10,14,0" />
                     <WrapPanel x:Name="GalleryPanel" Margin="6,6,6,18" />
+                </StackPanel>
+            </ScrollViewer>
+
+            <ScrollViewer x:Name="KeptPanelHost" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Visibility="Collapsed">
+                <StackPanel>
+                    <TextBlock x:Name="KeptHeaderTextBlock" Foreground="#FFB8B8C8" FontSize="14" Margin="14,10,14,0" />
+                    <WrapPanel x:Name="KeptPanel" Margin="6,6,6,18" />
+                </StackPanel>
+            </ScrollViewer>
+
+            <ScrollViewer x:Name="DiscardedPanelHost" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Visibility="Collapsed">
+                <StackPanel>
+                    <TextBlock x:Name="DiscardedHeaderTextBlock" Foreground="#FFB8B8C8" FontSize="14" Margin="14,10,14,0" />
+                    <WrapPanel x:Name="DiscardedPanel" Margin="6,6,6,18" />
                 </StackPanel>
             </ScrollViewer>
 

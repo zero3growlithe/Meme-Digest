@@ -103,6 +103,20 @@ public sealed class UserHistory
         return false;
     }
 
+    /// <summary>Removes every entry for a relative path (used by the reset-to-drawable action).</summary>
+    public void RemoveAll(MemeHistoryState state, string relativePath)
+    {
+        string normalizedPath = NormalizePath(relativePath);
+        for (int index = Entries.Count - 1; index >= 0; index--)
+        {
+            MemeHistoryEntry entry = Entries[index];
+            if (entry.State == state && string.Equals(entry.RelativePath, normalizedPath, StringComparison.OrdinalIgnoreCase))
+            {
+                Entries.RemoveAt(index);
+            }
+        }
+    }
+
     // ── File I/O ──
 
     public static string GetHistoryFilePath(string historyDirectory, string profileName)

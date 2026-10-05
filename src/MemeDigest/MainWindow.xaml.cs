@@ -44,6 +44,17 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
     private int viewerCardIndex;
 
+    // ── Nested types ──
+
+    private enum GalleryTab
+    {
+        Drawer,
+
+        Kept,
+
+        Discarded
+    }
+
     // ── Video player state ──
 
     private bool isVideoPlaying;
@@ -54,6 +65,18 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
     private bool suppressSeekSliderEvents;
 
     private readonly System.Windows.Threading.DispatcherTimer viewerClock = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
+
+    // ── Tab state ──
+
+    /// <summary>Which main tab is active — drives which panel the viewer/selection logic touches.</summary>
+    private GalleryTab activeTab = GalleryTab.Drawer;
+
+    private readonly List<GalleryCard> keptCards = new List<GalleryCard>();
+
+    private readonly List<GalleryCard> discardedCards = new List<GalleryCard>();
+
+    /// <summary>Selection state per tab: Drawer uses selectedByRelativePath; history tabs use historySelection.</summary>
+    private readonly HashSet<string> historySelection = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
     // ── Construction ──
 
@@ -232,17 +255,31 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
     private void GalleryCard_SelectionChanged(GalleryCard card)
     {
-        selectedByRelativePath[card.Media.RelativePath] = card.IsSelected;
+        if (activeTab == GalleryTab.Drawer)
+        {
+            selectedByRelativePath[card.Media.RelativePath] = card.IsSelected;
+        }
+        else
+        {
+            if (card.IsSelected)
+            {
+                historySelection.Add(card.Media.RelativePath);
+            }
+            else
+            {
+                historySelection.Remove(card.Media.RelativePath);
+            }
+        }
+
         UpdateExportButtonStates();
     }
 
     private List<string> GetSelectedAbsolutePaths()
     {
         List<string> paths = new List<string>();
-        foreach (GalleryCard card in galleryCards)
+        foreach (GalleryCard card in ActiveCards())
         {
-            bool isSelected;
-            if (selectedByRelativePath.TryGetValue(card.Media.RelativePath, out isSelected) && isSelected)
+            if (!card.IsPlaceholder && card.IsSelected)
             {
                 paths.Add(card.Media.AbsolutePath);
             }
@@ -254,10 +291,9 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
     private List<string> GetSelectedRelativePaths()
     {
         List<string> paths = new List<string>();
-        foreach (GalleryCard card in galleryCards)
+        foreach (GalleryCard card in ActiveCards())
         {
-            bool isSelected;
-            if (selectedByRelativePath.TryGetValue(card.Media.RelativePath, out isSelected) && isSelected)
+            if (!card.IsPlaceholder && card.IsSelected)
             {
                 paths.Add(card.Media.RelativePath);
             }
@@ -372,13 +408,130 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
         }
     }
 
+    // ── History tabs (Kept / Discarded) ──
+
+    /// <summary>Loads the active history tab's cards from the drawn library + history.</summary>
+    private async Task LoadHistoryTabAsync()
+    {
+        if (isMutatingGallery)
+        {
+            return;
+        }
+
+        MemeHistoryState state = activeTab == GalleryTab.Kept ? MemeHistoryState.Picked : MemeHistoryState.Discarded;
+        WrapPanel targetPanel = activeTab == GalleryTab.Kept ? KeptPanel : DiscardedPanel;
+        TextBlock targetHeader = activeTab == GalleryTab.Kept ? KeptHeaderTextBlock : DiscardedHeaderTextBlock;
+        List<GalleryCard> targetCards = activeTab == GalleryTab.Kept ? keptCards : discardedCards;
+        SetStatus("Scanning library…");
+
+        List<MediaFileInfo> historyMedia = await Task.Run(() =>
+        {
+            List<MediaFileInfo> result = new List<MediaFileInfo>();
+            foreach (MemeHistoryEntry entry in history.Entries)
+            {
+                if (entry.State != state)
+                {
+                    continue;
+                }
+
+                string absolutePath = Path.Combine(settings.CurrentLibraryPath, entry.RelativePath.Replace('/', Path.DirectorySeparatorChar));
+                if (File.Exists(absolutePath))
+                {
+                    result.Add(new MediaFileInfo(absolutePath, entry.RelativePath.Replace('\\', '/'), ResolveMediaKind(Path.GetExtension(absolutePath))));
+                }
+            }
+
+            return result;
+        });
+
+        if (isMutatingGallery)
+        {
+            return;
+        }
+
+        // Synchronous apply on the UI thread.
+        foreach (GalleryCard card in targetCards)
+        {
+            card.ReleaseMedia();
+        }
+
+        targetCards.Clear();
+        targetPanel.Children.Clear();
+        historySelection.Clear();
+
+        foreach (MediaFileInfo media in historyMedia)
+        {
+            GalleryCard card = new GalleryCard(media, thumbnailService, MaxSelectionCount);
+            card.ThumbnailClicked += GalleryCard_ThumbnailClicked;
+            card.SelectionChanged += GalleryCard_SelectionChanged;
+            targetCards.Add(card);
+            targetPanel.Children.Add(card);
+        }
+
+        targetHeader.Text = (activeTab == GalleryTab.Kept ? "Kept: " : "Discarded: ") + targetCards.Count
+            + " meme" + (targetCards.Count == 1 ? string.Empty : "s") + " — tick, then Reset selected returns them to the drawer pool";
+        SetStatus((activeTab == GalleryTab.Kept ? "Kept" : "Discarded") + " tab loaded: " + targetCards.Count + " item(s).");
+        UpdateExportButtonStates();
+    }
+
+    /// <summary>Extension → MediaKind mapping for history-tab cards (library scan does its own).</summary>
+    private MediaKind ResolveMediaKind(string extension)
+    {
+        if (settings.IsKnownImageExtension(extension))
+        {
+            return MediaKind.Image;
+        }
+
+        if (settings.IsKnownVideoExtension(extension))
+        {
+            return MediaKind.Video;
+        }
+
+        return MediaKind.Unsupported;
+    }
+
+    private async void ResetSelectedButton_Click(object sender, RoutedEventArgs eventArgs)
+    {
+        if (isMutatingGallery || activeTab == GalleryTab.Drawer)
+        {
+            return;
+        }
+
+        List<string> toReset = new List<string>(historySelection);
+        if (toReset.Count == 0)
+        {
+            SetStatus("Nothing selected to reset.");
+            return;
+        }
+
+        isMutatingGallery = true;
+        try
+        {
+            MemeHistoryState state = activeTab == GalleryTab.Kept ? MemeHistoryState.Picked : MemeHistoryState.Discarded;
+            foreach (string relativePath in toReset)
+            {
+                history.RemoveAll(state, relativePath);
+            }
+
+            await Task.Run(() => history.SaveToFile(settings.HistoryDirectory));
+            RefreshHistorySummary();
+            await LoadHistoryTabAsync();
+            SetStatus(toReset.Count + " meme(s) returned to the drawable pool.");
+        }
+        finally
+        {
+            isMutatingGallery = false;
+        }
+    }
+
     // ── Viewer ──
 
     private void OpenViewer(GalleryCard card)
     {
-        for (int index = 0; index < galleryCards.Count; index++)
+        List<GalleryCard> cards = ActiveCards();
+        for (int index = 0; index < cards.Count; index++)
         {
-            if (ReferenceEquals(galleryCards[index], card))
+            if (ReferenceEquals(cards[index], card))
             {
                 viewerCardIndex = index;
                 ShowViewerForCurrentIndex();
@@ -389,16 +542,23 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
     private void ShowViewerForCurrentIndex()
     {
-        if (viewerCardIndex < 0 || viewerCardIndex >= galleryCards.Count)
+        List<GalleryCard> cards = ActiveCards();
+        if (viewerCardIndex < 0 || viewerCardIndex >= cards.Count)
         {
             CloseViewer();
             return;
         }
 
-        GalleryCard card = galleryCards[viewerCardIndex];
+        GalleryCard card = cards[viewerCardIndex];
+        if (card.IsPlaceholder)
+        {
+            CloseViewer();
+            return;
+        }
+
         ViewerOverlay.Visibility = Visibility.Visible;
         ViewerOverlay.Focus();
-        ViewerCaptionTextBlock.Text = card.Media.RelativePath + "   [" + (viewerCardIndex + 1) + "/" + galleryCards.Count + "]" + (card.IsSelected ? "   ✓ selected" : string.Empty);
+        ViewerCaptionTextBlock.Text = card.Media.RelativePath + "   [" + (viewerCardIndex + 1) + "/" + cards.Count + "]" + (card.IsSelected ? "   ✓ selected" : string.Empty);
         ShowViewerMedia(card.Media);
     }
 
@@ -516,7 +676,8 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
     private void StepViewer(int delta)
     {
-        if (galleryCards.Count == 0)
+        List<GalleryCard> cards = ActiveCards();
+        if (cards.Count == 0)
         {
             return;
         }
@@ -524,9 +685,9 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
         int nextIndex = viewerCardIndex + delta;
         if (nextIndex < 0)
         {
-            nextIndex = galleryCards.Count - 1;
+            nextIndex = cards.Count - 1;
         }
-        else if (nextIndex >= galleryCards.Count)
+        else if (nextIndex >= cards.Count)
         {
             nextIndex = 0;
         }
@@ -554,47 +715,68 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
         // Snapshot synchronously, then record history; every UI-tree write below happens
         // in a synchronous block on the UI thread (the dispatcher is the gallery lock).
-        if (viewerCardIndex < 0 || viewerCardIndex >= galleryCards.Count)
+        List<GalleryCard> cards = ActiveCards();
+        if (viewerCardIndex < 0 || viewerCardIndex >= cards.Count)
         {
             return;
         }
 
-        GalleryCard card = galleryCards[viewerCardIndex];
+        GalleryCard card = cards[viewerCardIndex];
         MediaFileInfo consumedMedia = card.Media;
         int consumedIndex = viewerCardIndex;
+        GalleryTab viewerTab = activeTab;
 
         isMutatingGallery = true;
         try
         {
             await RecordHistoryEntryAsync(state, consumedMedia.RelativePath);
 
-            int cardIndex = FindCardIndex(card);
-
-            // List update first, then one-pass panel rebuild — never `Children[index] = ...`.
-            if (cardIndex >= 0)
+            if (viewerTab == GalleryTab.Drawer)
             {
-                DisposeCardMedia(card);
-                galleryCards[cardIndex] = CreatePlaceholderCard();
-                RebuildGalleryPanel();
-            }
+                int cardIndex = FindCardIndex(card);
 
-            RefreshHistorySummary();
-            UpdateExportButtonStates();
+                // List update first, then one-pass panel rebuild — never `Children[index] = ...`.
+                if (cardIndex >= 0)
+                {
+                    DisposeCardMedia(card);
+                    galleryCards[cardIndex] = CreatePlaceholderCard();
+                    RebuildGalleryPanel();
+                }
 
-            // Keep/discard should chain: advance straight to the next drawn meme.
-            int nextIndex = FindNextViewableIndex(consumedIndex);
-            if (nextIndex >= 0)
-            {
-                viewerCardIndex = nextIndex;
-                ShowViewerForCurrentIndex();
+                RefreshHistorySummary();
+                UpdateExportButtonStates();
+
+                // Keep/discard should chain: advance straight to the next drawn meme.
+                int nextIndex = FindNextViewableIndex(consumedIndex);
+                if (nextIndex >= 0)
+                {
+                    viewerCardIndex = nextIndex;
+                    ShowViewerForCurrentIndex();
+                }
+                else
+                {
+                    CloseViewer();
+                    SetStatus("All memes in this batch were processed — press Draw for a fresh one.");
+                }
+
+                await ReplaceConsumedCardsAsync();
             }
             else
             {
-                CloseViewer();
-                SetStatus("All memes in this batch were processed — press Draw for a fresh one.");
+                // History tab: the meme already has its state recorded; just move on.
+                RefreshHistorySummary();
+                int nextIndex = FindNextViewableIndex(consumedIndex);
+                if (nextIndex >= 0)
+                {
+                    viewerCardIndex = nextIndex;
+                    ShowViewerForCurrentIndex();
+                }
+                else
+                {
+                    CloseViewer();
+                    SetStatus("All memes in this tab were viewed.");
+                }
             }
-
-            await ReplaceConsumedCardsAsync();
         }
         finally
         {
@@ -604,11 +786,12 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
     /// <summary>
     /// First non-placeholder card searching forward from consumedIndex (wrapping);
-    /// -1 when the whole drawn batch was consumed.
+    /// -1 when nothing viewable remains.
     /// </summary>
     private int FindNextViewableIndex(int consumedIndex)
     {
-        int totalCards = galleryCards.Count;
+        List<GalleryCard> cards = ActiveCards();
+        int totalCards = cards.Count;
         if (totalCards == 0)
         {
             return -1;
@@ -617,7 +800,7 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
         for (int offset = 1; offset <= totalCards; offset++)
         {
             int index = (consumedIndex + offset) % totalCards;
-            if (!galleryCards[index].IsPlaceholder)
+            if (!cards[index].IsPlaceholder)
             {
                 return index;
             }
@@ -631,6 +814,14 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
     {
         if (isMutatingGallery)
         {
+            return;
+        }
+
+        // History tabs: keep/discard-all is a no-op there (cards are already in history);
+        // the reset flow handles moving entries back to the drawable pool.
+        if (activeTab != GalleryTab.Drawer)
+        {
+            SetStatus("This tab already has its history recorded — use Reset selected to draw memes again.");
             return;
         }
 
@@ -699,7 +890,7 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
     private void SelectAllButton_Click(object sender, RoutedEventArgs eventArgs)
     {
         int selectedCount = GetSelectedAbsolutePaths().Count;
-        foreach (GalleryCard card in galleryCards)
+        foreach (GalleryCard card in ActiveCards())
         {
             if (card.IsPlaceholder || card.IsSelected)
             {
@@ -719,7 +910,7 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
     private void DeselectAllButton_Click(object sender, RoutedEventArgs eventArgs)
     {
-        foreach (GalleryCard card in galleryCards)
+        foreach (GalleryCard card in ActiveCards())
         {
             if (!card.IsPlaceholder && card.IsSelected)
             {
@@ -1071,9 +1262,44 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
         GalleryPanel.Children.Clear();
         galleryCards.Clear();
         selectedByRelativePath.Clear();
+        ClearHistoryTabPanels(disposeMedia: true);
+        activeTab = GalleryTab.Drawer;
+        suppressProfileEvents = true;
+        DrawerTabButton.IsChecked = true;
+        suppressProfileEvents = false;
+        ApplyTabVisibility();
         GalleryHeaderTextBlock.Text = "Profile switched to \"" + profileName + "\" — draw fresh memes";
         UpdateExportButtonStates();
         SetStatus("Switched to profile: " + profileName);
+    }
+
+    /// <summary>Clears Kept/Discarded tab lists and panels (called on tab reload paths that need full disposal).</summary>
+    private void ClearHistoryTabPanels(bool disposeMedia)
+    {
+        foreach (GalleryCard card in keptCards)
+        {
+            if (disposeMedia)
+            {
+                card.ReleaseMedia();
+            }
+        }
+
+        keptCards.Clear();
+        KeptPanel.Children.Clear();
+        KeptHeaderTextBlock.Text = string.Empty;
+
+        foreach (GalleryCard card in discardedCards)
+        {
+            if (disposeMedia)
+            {
+                card.ReleaseMedia();
+            }
+        }
+
+        discardedCards.Clear();
+        DiscardedPanel.Children.Clear();
+        DiscardedHeaderTextBlock.Text = string.Empty;
+        historySelection.Clear();
     }
 
     private void SaveSettings()
@@ -1325,6 +1551,65 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
         return null;
     }
 
+    // ── Tabs ──
+
+    private void DrawerTabButton_Checked(object sender, RoutedEventArgs eventArgs)
+    {
+        SwitchTab(GalleryTab.Drawer);
+    }
+
+    private void KeptTabButton_Checked(object sender, RoutedEventArgs eventArgs)
+    {
+        SwitchTab(GalleryTab.Kept);
+    }
+
+    private void DiscardedTabButton_Checked(object sender, RoutedEventArgs eventArgs)
+    {
+        SwitchTab(GalleryTab.Discarded);
+    }
+
+    private void SwitchTab(GalleryTab tab)
+    {
+        if (activeTab == tab)
+        {
+            return;
+        }
+
+        activeTab = tab;
+        CloseViewer();
+        UpdateExportButtonStates();
+
+        if (tab == GalleryTab.Drawer)
+        {
+            ApplyTabVisibility();
+            SetStatus("Ready — press Draw for fresh memes.");
+        }
+        else
+        {
+            ApplyTabVisibility();
+            _ = LoadHistoryTabAsync();
+        }
+    }
+
+    private void ApplyTabVisibility()
+    {
+        DrawerTabContent.Visibility = activeTab == GalleryTab.Drawer ? Visibility.Visible : Visibility.Collapsed;
+        KeptPanelHost.Visibility = activeTab == GalleryTab.Kept ? Visibility.Visible : Visibility.Collapsed;
+        DiscardedPanelHost.Visibility = activeTab == GalleryTab.Discarded ? Visibility.Visible : Visibility.Collapsed;
+        ResetSelectedButton.Visibility = activeTab == GalleryTab.Drawer ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    /// <summary>Card list of the active tab — viewer/selection logic routes through this.</summary>
+    private List<GalleryCard> ActiveCards()
+    {
+        return activeTab switch
+        {
+            GalleryTab.Kept => keptCards,
+            GalleryTab.Discarded => discardedCards,
+            _ => galleryCards
+        };
+    }
+
     // ── Card media lifecycle ──
 
     private void DisposeCardMedia(GalleryCard card)
@@ -1347,6 +1632,7 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
         base.OnClosing(eventArgs);
         CloseViewer();
         DisposeAllCardMedia();
+        ClearHistoryTabPanels(disposeMedia: true);
         try
         {
             history.SaveToFile(settings.HistoryDirectory);
