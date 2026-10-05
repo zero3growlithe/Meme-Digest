@@ -22,15 +22,59 @@ public sealed class AppSettings
 
     // ── Persisted properties ──
 
-    public string LibraryPath { get; set; } = string.Empty;
+    /// <summary>Meme library root per profile — each user browses their own source folder.</summary>
+    public Dictionary<string, string> ProfileLibraryPaths { get; set; } = new Dictionary<string, string>();
 
-    public string HistoryDirectory { get; set; } = string.Empty;
+    /// <summary>
+    /// Library root of the CURRENT profile (the legacy flat `LibraryPath` key from older
+    /// settings files is migrated into ProfileLibraryPaths during FillDefaults).
+    /// </summary>
+    public string CurrentLibraryPath
+    {
+        get
+        {
+            string path;
+            if (ProfileLibraryPaths != null && ProfileLibraryPaths.TryGetValue(CurrentUserProfile ?? string.Empty, out path))
+            {
+                return path ?? string.Empty;
+            }
+
+            return string.Empty;
+        }
+        set
+        {
+            if (string.IsNullOrWhiteSpace(CurrentUserProfile))
+            {
+                return;
+            }
+
+            ProfileLibraryPaths ??= new Dictionary<string, string>();
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                ProfileLibraryPaths.Remove(CurrentUserProfile);
+            }
+            else
+            {
+                ProfileLibraryPaths[CurrentUserProfile] = value;
+            }
+        }
+    }
 
     public string ThumbnailDirectory { get; set; } = string.Empty;
 
     public int DrawCount { get; set; } = DefaultDrawCount;
 
     public string FfmpegExecutablePath { get; set; } = "ffmpeg";
+
+    // ── Legacy migration state ──
+
+    /// <summary>Legacy flat LibraryPath captured from old JSON in FillDefaults; null elsewhere.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    private string? legacyLibraryPath;
+
+    /// <summary>Raw settings JSON captured at load, parsed once in FillDefaults for legacy migration.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    private string? _rawJson;
 
     public List<string> UserProfiles { get; set; } = new List<string> { DefaultProfileName };
 
@@ -73,7 +117,7 @@ public sealed class AppSettings
 
     public bool IsLibraryPathValid
     {
-        get { return !string.IsNullOrWhiteSpace(LibraryPath) && Directory.Exists(LibraryPath); }
+        get { return !string.IsNullOrWhiteSpace(CurrentLibraryPath) && Directory.Exists(CurrentLibraryPath); }
     }
 
     public bool HasVideoExtensions
@@ -94,7 +138,9 @@ public sealed class AppSettings
                 AppSettings? loaded = JsonSerializer.Deserialize<AppSettings>(json, SerializerOptions);
                 if (loaded != null)
                 {
+                    loaded._rawJson = json;
                     loaded.FillDefaults();
+                    loaded._rawJson = null;
                     return loaded;
                 }
             }
@@ -128,6 +174,25 @@ public sealed class AppSettings
 
     public void FillDefaults()
     {
+        // Raw JSON capture: the legacy flat key (removed from the model) still arrives
+        // here for manual migration when present in an old settings file.
+        legacyLibraryPath = null;
+        if (_rawJson != null)
+        {
+            try
+            {
+                using System.Text.Json.JsonDocument document = System.Text.Json.JsonDocument.Parse(_rawJson);
+                if (document.RootElement.TryGetProperty("LibraryPath", out System.Text.Json.JsonElement element) && element.ValueKind == System.Text.Json.JsonValueKind.String)
+                {
+                    legacyLibraryPath = element.GetString();
+                }
+            }
+            catch (Exception)
+            {
+                // Unparseable raw json → no migration.
+            }
+        }
+
         if (string.IsNullOrWhiteSpace(HistoryDirectory))
         {
             HistoryDirectory = DefaultHistoryDirectory;
@@ -151,6 +216,17 @@ public sealed class AppSettings
         if (string.IsNullOrWhiteSpace(CurrentUserProfile) || !UserProfiles.Contains(CurrentUserProfile))
         {
             CurrentUserProfile = UserProfiles[0];
+        }
+
+        // Legacy migration: older settings files kept ONE flat LibraryPath. Copy it into
+        // the current profile's per-profile entry once, then it lives per-profile.
+        ProfileLibraryPaths ??= new Dictionary<string, string>();
+        if (legacyLibraryPath != null && !string.IsNullOrWhiteSpace(legacyLibraryPath))
+        {
+            if (!ProfileLibraryPaths.ContainsKey(CurrentUserProfile))
+            {
+                ProfileLibraryPaths[CurrentUserProfile] = legacyLibraryPath;
+            }
         }
 
         if (ImageExtensions == null || ImageExtensions.Count == 0)

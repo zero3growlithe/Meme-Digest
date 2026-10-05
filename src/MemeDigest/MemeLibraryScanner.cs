@@ -36,7 +36,7 @@ public sealed class MemeLibraryScanner
             AttributesToSkip = FileAttributes.Hidden | FileAttributes.System
         };
 
-        foreach (string filePath in Directory.EnumerateFiles(settings.LibraryPath, "*", enumerationOptions))
+        foreach (string filePath in Directory.EnumerateFiles(settings.CurrentLibraryPath, "*", enumerationOptions))
         {
             string extension = Path.GetExtension(filePath);
             MediaKind kind = ResolveKind(settings, extension);
@@ -45,7 +45,7 @@ public sealed class MemeLibraryScanner
                 continue;
             }
 
-            string relativePath = Path.GetRelativePath(settings.LibraryPath, filePath).Replace('\\', '/');
+            string relativePath = Path.GetRelativePath(settings.CurrentLibraryPath, filePath).Replace('\\', '/');
             if (excluded.Contains(relativePath))
             {
                 continue;

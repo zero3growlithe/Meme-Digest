@@ -21,7 +21,8 @@ public partial class SettingsWindow : Window, System.Windows.Forms.IWin32Window
         InitializeComponent();
         this.settings = settings;
 
-        LibraryPathBox.Text = settings.LibraryPath;
+        LibraryPathBox.Text = settings.CurrentLibraryPath;
+        LibraryPathLabel.Text = "Meme library root for \"" + settings.CurrentUserProfile + "\" profile (subfolders are scanned recursively)";
         HistoryDirectoryBox.Text = settings.HistoryDirectory;
         ThumbnailDirectoryBox.Text = settings.ThumbnailDirectory;
         FfmpegPathBox.Text = settings.FfmpegExecutablePath;
@@ -120,7 +121,7 @@ public partial class SettingsWindow : Window, System.Windows.Forms.IWin32Window
             return;
         }
 
-        settings.LibraryPath = libraryPath;
+        settings.CurrentLibraryPath = libraryPath;
         settings.HistoryDirectory = HistoryDirectoryBox.Text.Trim();
         settings.ThumbnailDirectory = ThumbnailDirectoryBox.Text.Trim();
         settings.FfmpegExecutablePath = FfmpegPathBox.Text.Trim();
