@@ -71,6 +71,8 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
     /// <summary>Which main tab is active — drives which panel the viewer/selection logic touches.</summary>
     private GalleryTab activeTab = GalleryTab.Drawer;
 
+    private int historyLoadVersion;
+
     private readonly List<GalleryCard> keptCards = new List<GalleryCard>();
 
     private readonly List<GalleryCard> discardedCards = new List<GalleryCard>();
@@ -87,6 +89,7 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
         scanner = new MemeLibraryScanner();
         thumbnailService = new ThumbnailService(settings);
         history = UserHistory.LoadFromFile(settings.HistoryDirectory, settings.CurrentUserProfile);
+        history.CollapseToLatestState();
         viewerClock.Tick += ViewerClock_Tick;
         ProfileComboBox.ItemsSource = settings.UserProfiles;
         ProfileComboBox.SelectedItem = settings.CurrentUserProfile;
@@ -411,22 +414,17 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
     // ── History tabs (Kept / Discarded) ──
 
     /// <summary>Loads the active history tab's cards from the drawn library + history.</summary>
-    private async Task LoadHistoryTabAsync()
+            private async Task LoadHistoryTabAsync()
     {
-        if (isMutatingGallery)
-        {
-            return;
-        }
-
-        MemeHistoryState state = activeTab == GalleryTab.Kept ? MemeHistoryState.Picked : MemeHistoryState.Discarded;
-        WrapPanel targetPanel = activeTab == GalleryTab.Kept ? KeptPanel : DiscardedPanel;
-        TextBlock targetHeader = activeTab == GalleryTab.Kept ? KeptHeaderTextBlock : DiscardedHeaderTextBlock;
-        List<GalleryCard> targetCards = activeTab == GalleryTab.Kept ? keptCards : discardedCards;
+        GalleryTab requestedTab = activeTab;
+        MemeHistoryState state = requestedTab == GalleryTab.Kept ? MemeHistoryState.Picked : MemeHistoryState.Discarded;
         SetStatus("Scanning library…");
 
-        List<MediaFileInfo> historyMedia = await Task.Run(() =>
+        int loadVersion = ++historyLoadVersion;
+        // Background: validate which history entries still exist on disk.
+        HashSet<string> existingRelativePaths = await Task.Run(() =>
         {
-            List<MediaFileInfo> result = new List<MediaFileInfo>();
+            HashSet<string> result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (MemeHistoryEntry entry in history.Entries)
             {
                 if (entry.State != state)
@@ -437,19 +435,34 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
                 string absolutePath = Path.Combine(settings.CurrentLibraryPath, entry.RelativePath.Replace('/', Path.DirectorySeparatorChar));
                 if (File.Exists(absolutePath))
                 {
-                    result.Add(new MediaFileInfo(absolutePath, entry.RelativePath.Replace('\\', '/'), ResolveMediaKind(Path.GetExtension(absolutePath))));
+                    result.Add(entry.RelativePath);
                 }
             }
 
             return result;
         });
 
-        if (isMutatingGallery)
+        // A newer load (rapid tab switching) supersedes this one entirely.
+        if (loadVersion != historyLoadVersion)
         {
             return;
         }
 
-        // Synchronous apply on the UI thread.
+        if (requestedTab == GalleryTab.Kept)
+        {
+            ReloadHistoryTabData(KeptPanel, KeptHeaderTextBlock, keptCards, state, existingRelativePaths);
+        }
+        else if (requestedTab == GalleryTab.Discarded)
+        {
+            ReloadHistoryTabData(DiscardedPanel, DiscardedHeaderTextBlock, discardedCards, state, existingRelativePaths);
+        }
+
+        SetStatus((requestedTab == GalleryTab.Kept ? "Kept" : "Discarded") + " tab loaded: " + (requestedTab == GalleryTab.Kept ? keptCards.Count : discardedCards.Count) + " item(s).");
+    }
+
+    /// <summary>Synchronous rebuild of one history tab from `history` (caller owns the mutation flag).</summary>
+    private void ReloadHistoryTabData(WrapPanel targetPanel, TextBlock targetHeader, List<GalleryCard> targetCards, MemeHistoryState state, HashSet<string>? existingRelativePaths = null)
+    {
         foreach (GalleryCard card in targetCards)
         {
             card.ReleaseMedia();
@@ -459,22 +472,32 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
         targetPanel.Children.Clear();
         historySelection.Clear();
 
-        foreach (MediaFileInfo media in historyMedia)
+        foreach (MemeHistoryEntry entry in history.Entries)
         {
-            GalleryCard card = new GalleryCard(media, thumbnailService, MaxSelectionCount);
+            if (entry.State != state)
+            {
+                continue;
+            }
+
+            if (existingRelativePaths != null && !existingRelativePaths.Contains(entry.RelativePath))
+            {
+                continue;
+            }
+
+            string absolutePath = Path.Combine(settings.CurrentLibraryPath, entry.RelativePath.Replace('/', Path.DirectorySeparatorChar));
+            GalleryCard card = new GalleryCard(new MediaFileInfo(absolutePath, entry.RelativePath.Replace('\\', '/'), ResolveMediaKind(Path.GetExtension(absolutePath))), thumbnailService, MaxSelectionCount);
             card.ThumbnailClicked += GalleryCard_ThumbnailClicked;
             card.SelectionChanged += GalleryCard_SelectionChanged;
             targetCards.Add(card);
             targetPanel.Children.Add(card);
         }
 
-        targetHeader.Text = (activeTab == GalleryTab.Kept ? "Kept: " : "Discarded: ") + targetCards.Count
+        targetHeader.Text = (state == MemeHistoryState.Picked ? "Kept: " : "Discarded: ") + targetCards.Count
             + " meme" + (targetCards.Count == 1 ? string.Empty : "s") + " — tick, then Reset selected returns them to the drawer pool";
-        SetStatus((activeTab == GalleryTab.Kept ? "Kept" : "Discarded") + " tab loaded: " + targetCards.Count + " item(s).");
         UpdateExportButtonStates();
     }
 
-    /// <summary>Extension → MediaKind mapping for history-tab cards (library scan does its own).</summary>
+/// <summary>Extension → MediaKind mapping for history-tab cards (library scan does its own).</summary>
     private MediaKind ResolveMediaKind(string extension)
     {
         if (settings.IsKnownImageExtension(extension))
@@ -504,25 +527,33 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
             return;
         }
 
+        MemeHistoryState state = activeTab == GalleryTab.Kept ? MemeHistoryState.Picked : MemeHistoryState.Discarded;
+        foreach (string relativePath in toReset)
+        {
+            history.RemoveAll(state, relativePath);
+        }
+
+        // Reset removed entries: the other tab may still show stale copies, so both
+        // history panels reload. Reload runs AFTER isMutatingGallery clears (it
+        // early-returns while the flag is up).
+        await Task.Run(() => history.SaveToFile(settings.HistoryDirectory));
+        RefreshHistorySummary();
         isMutatingGallery = true;
         try
         {
-            MemeHistoryState state = activeTab == GalleryTab.Kept ? MemeHistoryState.Picked : MemeHistoryState.Discarded;
-            foreach (string relativePath in toReset)
-            {
-                history.RemoveAll(state, relativePath);
-            }
-
-            await Task.Run(() => history.SaveToFile(settings.HistoryDirectory));
-            RefreshHistorySummary();
-            await LoadHistoryTabAsync();
-            SetStatus(toReset.Count + " meme(s) returned to the drawable pool.");
+            ReloadHistoryTabData(activeTab == GalleryTab.Kept ? KeptPanel : DiscardedPanel,
+                activeTab == GalleryTab.Kept ? KeptHeaderTextBlock : DiscardedHeaderTextBlock,
+                activeTab == GalleryTab.Kept ? keptCards : discardedCards,
+                state);
         }
         finally
         {
             isMutatingGallery = false;
         }
+
+        SetStatus(toReset.Count + " meme(s) returned to the drawable pool.");
     }
+
 
     // ── Viewer ──
 
@@ -943,15 +974,18 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
     private async Task RecordHistoryEntryAsync(MemeHistoryState state, string relativePath)
     {
-        // Record in BOTH sections so the meme never draws again for this profile.
-        if (!history.Contains(MemeHistoryState.Picked, relativePath))
-        {
-            history.Add(MemeHistoryState.Picked, relativePath, DateTime.UtcNow);
-        }
+        // Exactly one state per meme: drop stale entries in the other section
+        // (legacy dual-written files or an explicit state flip), then record the
+        // section matching the button that was pressed.
+        MemeHistoryState oppositeState = state == MemeHistoryState.Picked
+            ? MemeHistoryState.Discarded
+            : MemeHistoryState.Picked;
 
-        if (!history.Contains(MemeHistoryState.Discarded, relativePath))
+        history.RemoveAll(oppositeState, relativePath);
+
+        if (!history.Contains(state, relativePath))
         {
-            history.Add(MemeHistoryState.Discarded, relativePath, DateTime.UtcNow);
+            history.Add(state, relativePath, DateTime.UtcNow);
         }
 
         await Task.Run(() => history.SaveToFile(settings.HistoryDirectory));
@@ -1254,6 +1288,7 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
     {
         SaveSettings();
         history = UserHistory.LoadFromFile(settings.HistoryDirectory, profileName);
+        history.CollapseToLatestState();
         settings.CurrentUserProfile = profileName;
         SaveSettings();
         UpdateTitle();
@@ -1380,12 +1415,19 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
         SaveSettings();
         history = UserHistory.LoadFromFile(settings.HistoryDirectory, nextProfile);
+        history.CollapseToLatestState();
         UpdateTitle();
         RefreshHistorySummary();
         DisposeAllCardMedia();
         GalleryPanel.Children.Clear();
         galleryCards.Clear();
         selectedByRelativePath.Clear();
+        ClearHistoryTabPanels(disposeMedia: true);
+        activeTab = GalleryTab.Drawer;
+        suppressProfileEvents = true;
+        DrawerTabButton.IsChecked = true;
+        suppressProfileEvents = false;
+        ApplyTabVisibility();
         GalleryHeaderTextBlock.Text = "Profile switched to \"" + nextProfile + "\" — draw fresh memes";
         UpdateExportButtonStates();
     }

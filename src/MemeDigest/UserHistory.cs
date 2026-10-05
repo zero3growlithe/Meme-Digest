@@ -73,6 +73,31 @@ public sealed class UserHistory
         return count;
     }
 
+    /// <summary>
+    /// Legacy cleanup: files written before the tabs existed carry the same meme in
+    /// BOTH sections, which made Kept and Discarded render identical lists. A meme
+    /// gets exactly one state — the latest one wins (Entries is appended chronologically).
+    /// </summary>
+    public void CollapseToLatestState()
+    {
+        Dictionary<string, (MemeHistoryState State, MemeHistoryEntry Entry)> latestByPath = new Dictionary<string, (MemeHistoryState, MemeHistoryEntry)>(StringComparer.OrdinalIgnoreCase);
+        foreach (MemeHistoryEntry entry in Entries)
+        {
+            latestByPath[entry.RelativePath] = (entry.State, entry);
+        }
+
+        if (latestByPath.Count == Entries.Count)
+        {
+            return;
+        }
+
+        Entries.Clear();
+        foreach (MemeHistoryEntry entry in latestByPath.Values)
+        {
+            Entries.Add(entry);
+        }
+    }
+
     // ── Mutations ──
 
     public void Add(MemeHistoryState state, string relativePath, DateTime timestampUtc)
