@@ -561,14 +561,12 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
         GalleryCard card = galleryCards[viewerCardIndex];
         MediaFileInfo consumedMedia = card.Media;
+        int consumedIndex = viewerCardIndex;
 
         isMutatingGallery = true;
         try
         {
             await RecordHistoryEntryAsync(state, consumedMedia.RelativePath);
-
-            CloseViewer();
-            viewerCardIndex = -1;
 
             int cardIndex = FindCardIndex(card);
 
@@ -582,12 +580,50 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
             RefreshHistorySummary();
             UpdateExportButtonStates();
+
+            // Keep/discard should chain: advance straight to the next drawn meme.
+            int nextIndex = FindNextViewableIndex(consumedIndex);
+            if (nextIndex >= 0)
+            {
+                viewerCardIndex = nextIndex;
+                ShowViewerForCurrentIndex();
+            }
+            else
+            {
+                CloseViewer();
+                SetStatus("All memes in this batch were processed — press Draw for a fresh one.");
+            }
+
             await ReplaceConsumedCardsAsync();
         }
         finally
         {
             isMutatingGallery = false;
         }
+    }
+
+    /// <summary>
+    /// First non-placeholder card searching forward from consumedIndex (wrapping);
+    /// -1 when the whole drawn batch was consumed.
+    /// </summary>
+    private int FindNextViewableIndex(int consumedIndex)
+    {
+        int totalCards = galleryCards.Count;
+        if (totalCards == 0)
+        {
+            return -1;
+        }
+
+        for (int offset = 1; offset <= totalCards; offset++)
+        {
+            int index = (consumedIndex + offset) % totalCards;
+            if (!galleryCards[index].IsPlaceholder)
+            {
+                return index;
+            }
+        }
+
+        return -1;
     }
 
     /// <summary>Keep/discard every currently-selected card in one pass (batch buttons in the export toolbar).</summary>
@@ -904,6 +940,108 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
                 eventArgs.Handled = true;
                 break;
         }
+    }
+
+    /// <summary>
+    /// Tunnel handler on the overlay: fires even when focus rests on a viewer button
+    /// (bubbling KeyDown from the window stops at the focused element, which was why
+    /// arrows worked only after clicking a control first).
+    /// </summary>
+    private void ViewerOverlay_PreviewKeyDown(object sender, KeyEventArgs eventArgs)
+    {
+        switch (eventArgs.Key)
+        {
+            case Key.Escape:
+                CloseViewer();
+                eventArgs.Handled = true;
+                break;
+            case Key.Left:
+                StepViewer(-1);
+                eventArgs.Handled = true;
+                break;
+            case Key.Right:
+                StepViewer(1);
+                eventArgs.Handled = true;
+                break;
+            case Key.Enter when !eventArgs.IsRepeat:
+                _ = MarkCurrentViewerCard(MemeHistoryState.Picked);
+                eventArgs.Handled = true;
+                break;
+            case Key.Space when !eventArgs.IsRepeat:
+                _ = MarkCurrentViewerCard(MemeHistoryState.Discarded);
+                eventArgs.Handled = true;
+                break;
+            case Key.C when System.Windows.Input.Keyboard.Modifiers == ModifierKeys.Control:
+                CopyCurrentViewerMediaToClipboard();
+                eventArgs.Handled = true;
+                break;
+            case Key.X when System.Windows.Input.Keyboard.Modifiers == ModifierKeys.Control:
+                CutCurrentViewerMediaToClipboard();
+                eventArgs.Handled = true;
+                break;
+        }
+    }
+
+    // ── Viewer export actions ──
+
+    private void CopyCurrentViewerMediaToClipboard()
+    {
+        if (viewerCardIndex < 0 || viewerCardIndex >= galleryCards.Count)
+        {
+            return;
+        }
+
+        string absolutePath = galleryCards[viewerCardIndex].Media.AbsolutePath;
+        bool copied = ExportService.CopyFileListToClipboard(new[] { absolutePath });
+        SetStatus(copied ? "Copied to clipboard — paste with Ctrl+V." : "Clipboard copy failed (another app may be holding the clipboard).");
+    }
+
+    /// <summary>
+    /// Puts the file on the clipboard as a cut operation: pasting into Explorer moves
+    /// the file, pasting into Discord still uploads it as a normal file drop.
+    /// </summary>
+    private void CutCurrentViewerMediaToClipboard()
+    {
+        if (viewerCardIndex < 0 || viewerCardIndex >= galleryCards.Count)
+        {
+            return;
+        }
+
+        string absolutePath = galleryCards[viewerCardIndex].Media.AbsolutePath;
+        try
+        {
+            System.Windows.DataObject dataObject = new System.Windows.DataObject();
+            dataObject.SetFileDropList(new System.Collections.Specialized.StringCollection { absolutePath });
+            byte[] preferredDropEffect = new byte[4];
+            System.BitConverter.GetBytes(2).CopyTo(preferredDropEffect, 0); // DROPEFFECT_MOVE = 2
+            dataObject.SetData("Preferred DropEffect", preferredDropEffect);
+            Clipboard.SetDataObject(dataObject, copy: true);
+            SetStatus("Cut to clipboard — paste in Explorer to move the file.");
+        }
+        catch (Exception)
+        {
+            SetStatus("Clipboard cut failed (another app may be holding the clipboard).");
+        }
+    }
+
+    private void ViewerCopyButton_Click(object sender, RoutedEventArgs eventArgs)
+    {
+        CopyCurrentViewerMediaToClipboard();
+    }
+
+    private void ViewerRevealButton_Click(object sender, RoutedEventArgs eventArgs)
+    {
+        if (viewerCardIndex < 0 || viewerCardIndex >= galleryCards.Count)
+        {
+            return;
+        }
+
+        ExportService.RevealInExplorer(new[] { galleryCards[viewerCardIndex].Media.AbsolutePath });
+    }
+
+    private void ViewerBackdrop_MouseLeftButtonDown(object sender, MouseButtonEventArgs eventArgs)
+    {
+        CloseViewer();
     }
 
     // ── Profiles ──
