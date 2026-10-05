@@ -89,7 +89,8 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
     private void UpdateTitle()
     {
-        Title = nameof(MemeDigest) + " — " + settings.CurrentUserProfile;
+        string buildTag = string.IsNullOrWhiteSpace(BuildInfo.Sha) ? "dev" : (BuildInfo.Sha.Length > 8 ? BuildInfo.Sha[..8] : BuildInfo.Sha);
+        Title = nameof(MemeDigest) + " [" + buildTag + "] — " + settings.CurrentUserProfile;
     }
 
     // ── WinForms interop (folder dialog owner) ──
@@ -1033,6 +1034,11 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
     private async void HandleMoveOrCopyToFolder(bool move)
     {
+        if (isMutatingGallery)
+        {
+            return;
+        }
+
         List<string> absolutePaths = GetSelectedAbsolutePaths();
         List<string> relativePaths = GetSelectedRelativePaths();
         if (absolutePaths.Count == 0)
@@ -1046,20 +1052,37 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
             return;
         }
 
-        int completedCount = await Task.Run(() => ExportService.MoveOrCopy(absolutePaths, targetDirectory, move));
-        SetStatus(completedCount + " of " + absolutePaths.Count + " file(s) " + (move ? "moved" : "copied") + " to " + targetDirectory);
-
-        if (move && completedCount > 0)
+        isMutatingGallery = true;
+        try
         {
-            // Moved sources are gone from the library: mark picked so they never draw again,
-            // remove their cards, then refill empty slots.
-            foreach (string relativePath in relativePaths)
-            {
-                await RecordHistoryEntryAsync(MemeHistoryState.Picked, relativePath);
-            }
+            int completedCount = await Task.Run(() => ExportService.MoveOrCopy(absolutePaths, targetDirectory, move));
+            SetStatus(completedCount + " of " + absolutePaths.Count + " file(s) " + (move ? "moved" : "copied") + " to " + targetDirectory);
 
-            RemoveSelectedCards();
-            await ReplaceConsumedCardsAsync();
+            if (move && completedCount > 0)
+            {
+                // Moved sources are gone from the library: mark picked so they never draw again,
+                // remove their cards, then refill empty slots.
+                foreach (string relativePath in relativePaths)
+                {
+                    await RecordHistoryEntryAsync(MemeHistoryState.Picked, relativePath);
+                }
+
+                await galleryMutex.WaitAsync();
+                try
+                {
+                    RemoveSelectedCards();
+                }
+                finally
+                {
+                    galleryMutex.Release();
+                }
+
+                await ReplaceConsumedCardsAsync();
+            }
+        }
+        finally
+        {
+            isMutatingGallery = false;
         }
     }
 

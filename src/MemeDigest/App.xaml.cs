@@ -26,7 +26,7 @@ public partial class App : Application
 
         MessageBox.Show(
             $"Unexpected error: {eventArgs.Exception.Message}{Environment.NewLine}{Environment.NewLine}A log was written to {AppSettings.SettingsDirectory}\\crash.log",
-            nameof(MemeDigest),
+            nameof(MemeDigest) + " (build " + (BuildInfo.Sha?.Length > 8 ? BuildInfo.Sha[..8] : BuildInfo.Sha ?? "local") + ")",
             MessageBoxButton.OK,
             MessageBoxImage.Error);
 
