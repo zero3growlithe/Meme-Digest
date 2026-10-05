@@ -767,7 +767,7 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
         ApplyViewerSeek();
     }
 
-    private void ViewerSeekSlider_ValueChanged(object sender, System.Windows.Controls.Primitives.RoutedPropertyChangedEventArgs<double> eventArgs)
+    private void ViewerSeekSlider_ValueChanged(object sender, System.Windows.RoutedPropertyChangedEventArgs<double> eventArgs)
     {
         if (suppressSeekSliderEvents || isSeekDragging)
         {
@@ -800,7 +800,7 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
         ViewerVolumeSlider.Value = newVolume;
     }
 
-    private void ViewerVolumeSlider_ValueChanged(object sender, System.Windows.Controls.Primitives.RoutedPropertyChangedEventArgs<double> eventArgs)
+    private void ViewerVolumeSlider_ValueChanged(object sender, System.Windows.RoutedPropertyChangedEventArgs<double> eventArgs)
     {
         if (ViewerVideo == null)
         {
