@@ -20,6 +20,8 @@ public sealed class ThumbnailService
 
     private ImageSource? videoPlaceholder;
 
+    private string? resolvedFfmpegPath;
+
     // ── Construction ──
 
     public ThumbnailService(AppSettings settings)
@@ -28,6 +30,18 @@ public sealed class ThumbnailService
     }
 
     // ── Public API ──
+
+    /// <summary>True when the configured ffmpeg executable was found and launched at least once.</summary>
+    public bool WasFfmpegFound
+    {
+        get { return resolvedFfmpegPath != null; }
+    }
+
+    /// <summary>Runs the ffmpeg resolution probes on demand (cheap File.Exists checks, result cached).</summary>
+    public bool FfmpegAvailable
+    {
+        get { return FindFfmpegExecutable() != null; }
+    }
 
     public async Task<ImageSource?> GetThumbnailAsync(string absolutePath, MediaKind kind)
     {
@@ -144,21 +158,25 @@ public sealed class ThumbnailService
 
     private string? TryGeneratePosterWithFfmpeg(string absolutePath)
     {
-        if (!ffmpegGate.Wait(0))
-        {
-            // Another poster generation is running; skip so the UI stays responsive.
-            return null;
-        }
+        // Blocking wait is fine here: the caller already runs on a thread-pool thread,
+        // and queued generations beat skipped ones (a skip renders a permanent "no preview").
+        ffmpegGate.Wait();
 
         try
         {
+            string? ffmpegExecutable = FindFfmpegExecutable();
+            if (ffmpegExecutable == null)
+            {
+                return null;
+            }
+
             Directory.CreateDirectory(settings.ThumbnailDirectory);
             string posterPath = BuildPosterPath(settings.ThumbnailDirectory, absolutePath);
             string arguments = "-y -hide_banner -loglevel error -ss 1 -i \"" + absolutePath + "\" -frames:v 1 -vf \"scale='min(320,iw)':-2\" \"" + posterPath + "\"";
 
             var startInfo = new ProcessStartInfo
             {
-                FileName = settings.FfmpegExecutablePath,
+                FileName = ffmpegExecutable,
                 Arguments = arguments,
                 UseShellExecute = false,
                 CreateNoWindow = true,
@@ -201,6 +219,89 @@ public sealed class ThumbnailService
         {
             ffmpegGate.Release();
         }
+    }
+
+    // ── ffmpeg resolution ──
+
+    /// <summary>
+    /// Resolves the ffmpeg executable: configured path first, then well-known install roots, then PATH scan.
+    /// The result is cached until the settings change.
+    /// </summary>
+    private string? FindFfmpegExecutable()
+    {
+        if (resolvedFfmpegPath != null)
+        {
+            return resolvedFfmpegPath;
+        }
+
+        string configured = settings.FfmpegExecutablePath;
+        if (!string.IsNullOrWhiteSpace(configured) && !configured.Equals("ffmpeg", StringComparison.OrdinalIgnoreCase))
+        {
+            if (File.Exists(configured))
+            {
+                resolvedFfmpegPath = configured;
+                return configured;
+            }
+
+            // With .exe appended — users often paste the folder or omit the extension.
+            string withExtension = configured.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? configured : configured + ".exe";
+            if (File.Exists(withExtension))
+            {
+                resolvedFfmpegPath = withExtension;
+                return withExtension;
+            }
+
+            // Treated as a directory — probe ffmpeg.exe inside it.
+            if (Directory.Exists(configured))
+            {
+                string insideDirectory = Path.Combine(configured, "ffmpeg.exe");
+                if (File.Exists(insideDirectory))
+                {
+                    resolvedFfmpegPath = insideDirectory;
+                    return insideDirectory;
+                }
+            }
+        }
+
+        string[] wellKnownPaths =
+        {
+            Path.Combine(AppContext.BaseDirectory, "ffmpeg.exe"),
+            @"C:\ffmpeg\bin\ffmpeg.exe",
+            @"C:\ffmpeg\bin\ffmpeg",
+            @"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
+            @"C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe",
+            @"C:\tools\ffmpeg\bin\ffmpeg.exe",
+            @"C:\Users\" + Environment.UserName + @"\scoop\shims\ffmpeg.exe",
+            @"C:\Users\" + Environment.UserName + @"\scoop\apps\ffmpeg\current\bin\ffmpeg.exe"
+        };
+
+        foreach (string wellKnownPath in wellKnownPaths)
+        {
+            if (File.Exists(wellKnownPath))
+            {
+                resolvedFfmpegPath = wellKnownPath;
+                return wellKnownPath;
+            }
+        }
+
+        string pathVariable = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+        foreach (string pathDirectory in pathVariable.Split(';', StringSplitOptions.RemoveEmptyEntries))
+        {
+            string pathCandidate = Path.Combine(pathDirectory.Trim(), "ffmpeg.exe");
+            if (File.Exists(pathCandidate))
+            {
+                resolvedFfmpegPath = pathCandidate;
+                return pathCandidate;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Drops the cached ffmpeg resolution (called when settings change).</summary>
+    public void ResetFfmpegResolution()
+    {
+        resolvedFfmpegPath = null;
     }
 
     // ── Placeholder rendering ──

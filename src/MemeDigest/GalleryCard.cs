@@ -35,6 +35,11 @@ public sealed class GalleryCard : UserControl
         get { return selectCheckBox.IsChecked == true; }
     }
 
+    public bool IsPlaceholder
+    {
+        get { return isPlaceholder; }
+    }
+
     // ── Fields ──
 
     private readonly ThumbnailService thumbnailService;
@@ -232,7 +237,9 @@ public sealed class GalleryCard : UserControl
                 thumbnailImage.Source = thumbnailService.GetVideoPlaceholder();
                 thumbnailImage.Visibility = Visibility.Visible;
                 videoBadgeBorder.Visibility = Visibility.Visible;
-                tileMessageTextBlock.Text = "no preview" + Environment.NewLine + "(ffmpeg not found?)";
+                tileMessageTextBlock.Text = "no preview" + Environment.NewLine + (thumbnailService.WasFfmpegFound
+                    ? "(poster generation failed)"
+                    : "(ffmpeg not found — set its path in Settings)");
                 tileMessageTextBlock.Visibility = Visibility.Visible;
             }
             else

@@ -149,6 +149,8 @@
         <Border DockPanel.Dock="Top" Background="#FF18181F" Padding="12,6" BorderBrush="#FF26262E" BorderThickness="0,0,0,1">
             <WrapPanel>
                 <TextBlock Text="Selected:" Style="{StaticResource ToolBarTextStyle}" />
+                <Button x:Name="KeepAllButton" Content="❤ Keep all selected" Style="{StaticResource ToolBarButtonStyle}" Click="KeepAllButton_Click" />
+                <Button x:Name="DiscardAllButton" Content="✕ Discard all selected" Style="{StaticResource ToolBarButtonStyle}" Click="DiscardAllButton_Click" />
                 <Button x:Name="RevealSelectedButton" Content="Reveal in folders" Style="{StaticResource ToolBarButtonStyle}" Click="RevealSelectedButton_Click" />
                 <Button x:Name="CopySelectedButton" Content="Copy files to clipboard" Style="{StaticResource ToolBarButtonStyle}" Click="CopySelectedButton_Click" />
                 <Button x:Name="MoveSelectedButton" Content="Move…" Style="{StaticResource ToolBarButtonStyle}" Click="MoveSelectedButton_Click" />
@@ -183,7 +185,7 @@
 
                     <Grid Grid.Row="0" Margin="12,12,12,4">
                         <Image x:Name="ViewerImage" Stretch="Uniform" StretchDirection="DownOnly" Visibility="Collapsed" MouseDown="ViewerSurface_MouseDown" />
-                        <MediaElement x:Name="ViewerVideo" LoadedBehavior="Manual" UnloadedBehavior="Manual" ScrubbingEnabled="True" Stretch="Uniform" Visibility="Collapsed" MediaFailed="ViewerVideo_MediaFailed" MouseDown="ViewerSurface_MouseDown" />
+                        <MediaElement x:Name="ViewerVideo" LoadedBehavior="Manual" UnloadedBehavior="Manual" ScrubbingEnabled="True" Stretch="Uniform" Visibility="Collapsed" MediaFailed="ViewerVideo_MediaFailed" MediaOpened="ViewerVideo_MediaOpened" MediaEnded="ViewerVideo_MediaEnded" MouseDown="ViewerSurface_MouseDown" />
                         <TextBlock x:Name="ViewerMediaErrorTextBlock" Foreground="#FFC06060" HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap" Visibility="Collapsed" />
                     </Grid>
 
@@ -194,6 +196,12 @@
                                 <Button x:Name="ViewerKeepButton" Content="❤ Keep" Style="{StaticResource ToolBarButtonStyle}" Click="ViewerKeepButton_Click" />
                                 <Button x:Name="ViewerDiscardButton" Content="✕ Discard" Style="{StaticResource ToolBarButtonStyle}" Click="ViewerDiscardButton_Click" />
                                 <Button Content="Next ▶" Style="{StaticResource ToolBarButtonStyle}" Click="ViewerNextButton_Click" />
+                                <Rectangle Width="1" Margin="8,2" Fill="#FF3C3C4E" />
+                                <Button x:Name="ViewerPlayPauseButton" Content="⏸ Pause" Style="{StaticResource ToolBarButtonStyle}" Click="ViewerPlayPauseButton_Click" />
+                                <TextBlock x:Name="ViewerTimeTextBlock" Foreground="#FF8A8AA0" VerticalAlignment="Center" Margin="8,0,8,0" Text="00:00 / 00:00" />
+                                <Slider x:Name="ViewerSeekSlider" Width="220" Minimum="0" Maximum="100" IsMoveToPointEnabled="True" Thumb.DragStarted="ViewerSeekSlider_DragStarted" Thumb.DragCompleted="ViewerSeekSlider_DragCompleted" ValueChanged="ViewerSeekSlider_ValueChanged" />
+                                <Button x:Name="ViewerMuteButton" Content="🔊" Style="{StaticResource ToolBarButtonStyle}" Click="ViewerMuteButton_Click" />
+                                <Slider x:Name="ViewerVolumeSlider" Width="100" Minimum="0" Maximum="1" Value="0" ValueChanged="ViewerVolumeSlider_ValueChanged" ToolTip="Volume — audio plays muted at start, drag up to hear it" />
                             </StackPanel>
                             <TextBlock x:Name="ViewerCaptionTextBlock" Foreground="#FFB8B8C8" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="10,0" />
                             <Button DockPanel.Dock="Right" Content="Close (Esc)" Style="{StaticResource ToolBarButtonStyle}" HorizontalAlignment="Right" Click="ViewerCloseButton_Click" />

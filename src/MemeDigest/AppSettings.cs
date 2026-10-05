@@ -36,6 +36,9 @@ public sealed class AppSettings
 
     public string CurrentUserProfile { get; set; } = DefaultProfileName;
 
+    /// <summary>Video playback volume used by the viewer (0.0–1.0); muted by default so gallery browsing stays quiet.</summary>
+    public double VideoPlaybackVolume { get; set; } = 0.0;
+
     public List<string> ImageExtensions { get; set; } = new List<string>
     {
         ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff"
@@ -158,6 +161,11 @@ public sealed class AppSettings
         if (VideoExtensions == null)
         {
             VideoExtensions = new List<string>();
+        }
+
+        if (VideoPlaybackVolume < 0.0 || VideoPlaybackVolume > 1.0 || double.IsNaN(VideoPlaybackVolume))
+        {
+            VideoPlaybackVolume = 0.0;
         }
     }
 

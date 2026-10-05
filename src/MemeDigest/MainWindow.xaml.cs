@@ -29,6 +29,9 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
     /// <summary>Guard so a slow scan cannot double-load concurrently.</summary>
     private readonly SemaphoreSlim loadGate = new SemaphoreSlim(1, 1);
 
+    /// <summary>Serializes gallery mutations (cards list + panel children) so keep/discard/draw races cannot double-attach a card.</summary>
+    private readonly SemaphoreSlim galleryMutex = new SemaphoreSlim(1, 1);
+
     private UserHistory history;
 
     private readonly Dictionary<string, bool> selectedByRelativePath = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
@@ -41,6 +44,17 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
     private int viewerCardIndex;
 
+    // ── Video player state ──
+
+    private bool isVideoPlaying;
+
+    private bool isSeekDragging;
+
+    /// <summary>Set while the slider is updated from playback so ValueChanged does not echo back a seek.</summary>
+    private bool suppressSeekSliderEvents;
+
+    private readonly System.Windows.Threading.DispatcherTimer viewerClock = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
+
     // ── Construction ──
 
     public MainWindow()
@@ -50,6 +64,7 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
         scanner = new MemeLibraryScanner();
         thumbnailService = new ThumbnailService(settings);
         history = UserHistory.LoadFromFile(settings.HistoryDirectory, settings.CurrentUserProfile);
+        viewerClock.Tick += ViewerClock_Tick;
         ProfileComboBox.ItemsSource = settings.UserProfiles;
         ProfileComboBox.SelectedItem = settings.CurrentUserProfile;
         DrawCountBox.Text = settings.DrawCount.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -143,8 +158,18 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
                 return scanner.DrawRandom(eligible, requestedCount, random);
             });
 
-            selectedByRelativePath.Clear();
-            RenderGallery(drawn);
+            await galleryMutex.WaitAsync();
+            try
+            {
+                CloseViewer();
+                viewerCardIndex = -1;
+                await RenderGalleryAsync(drawn);
+            }
+            finally
+            {
+                galleryMutex.Release();
+            }
+
             SaveSettings();
 
             if (drawn.Count == 0)
@@ -153,7 +178,20 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
             }
             else
             {
-                SetStatus("Drew " + drawn.Count + " meme" + (drawn.Count == 1 ? string.Empty : "s") + ".");
+                bool hasVideos = false;
+                foreach (MediaFileInfo item in drawn)
+                {
+                    if (item.Kind == MediaKind.Video)
+                    {
+                        hasVideos = true;
+                        break;
+                    }
+                }
+
+                string ffmpegHint = hasVideos && !thumbnailService.FfmpegAvailable
+                    ? "  Video previews disabled — ffmpeg not found (set its path in Settings)."
+                    : string.Empty;
+                SetStatus("Drew " + drawn.Count + " meme" + (drawn.Count == 1 ? string.Empty : "s") + "." + ffmpegHint);
             }
         }
         finally
@@ -165,7 +203,8 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
     // ── Gallery rendering ──
 
-    private void RenderGallery(List<MediaFileInfo> drawn)
+    /// <summary>Builds all cards (must be called while holding galleryMutex — touches galleryCards and GalleryPanel).</summary>
+    private async Task RenderGalleryAsync(List<MediaFileInfo> drawn)
     {
         DisposeAllCardMedia();
         GalleryPanel.Children.Clear();
@@ -183,6 +222,7 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
         GalleryHeaderTextBlock.Text = GalleryHeaderTemplate();
         UpdateExportButtonStates();
+        await Task.CompletedTask;
     }
 
     private string GalleryHeaderTemplate()
@@ -234,6 +274,8 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
     private void UpdateExportButtonStates()
     {
         bool hasSelection = GetSelectedAbsolutePaths().Count > 0;
+        KeepAllButton.IsEnabled = hasSelection;
+        DiscardAllButton.IsEnabled = hasSelection;
         RevealSelectedButton.IsEnabled = hasSelection;
         CopySelectedButton.IsEnabled = hasSelection;
         MoveSelectedButton.IsEnabled = hasSelection;
@@ -245,28 +287,22 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
     private async Task ReplaceConsumedCardsAsync()
     {
         int slotsToRefill = 0;
-        HashSet<int> slotIndexes = new HashSet<int>();
-        for (int index = 0; index < galleryCards.Count; index++)
+        HashSet<string> currentlyDisplayed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (GalleryCard card in galleryCards)
         {
-            if (galleryCards[index].Media.RelativePath.Length == 0)
+            if (card.IsPlaceholder)
             {
-                slotIndexes.Add(index);
                 slotsToRefill++;
+            }
+            else
+            {
+                currentlyDisplayed.Add(card.Media.RelativePath);
             }
         }
 
         if (slotsToRefill == 0)
         {
             return;
-        }
-
-        HashSet<string> currentlyDisplayed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (GalleryCard card in galleryCards)
-        {
-            if (card.Media.RelativePath.Length > 0)
-            {
-                currentlyDisplayed.Add(card.Media.RelativePath);
-            }
         }
 
         List<MediaFileInfo> replacements = await Task.Run(() =>
@@ -292,24 +328,33 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
             return;
         }
 
-        int replacementIndex = 0;
-        foreach (int slotIndex in slotIndexes)
+        // Slot indexes are re-derived INSIDE the mutex: card layout may have changed while replacements were drawn.
+        await galleryMutex.WaitAsync();
+        try
         {
-            if (replacementIndex >= replacements.Count)
+            int replacementIndex = 0;
+            for (int slotIndex = 0; slotIndex < galleryCards.Count && replacementIndex < replacements.Count; slotIndex++)
             {
-                break;
+                if (!galleryCards[slotIndex].IsPlaceholder)
+                {
+                    continue;
+                }
+
+                GalleryCard replacement = new GalleryCard(replacements[replacementIndex], thumbnailService, MaxSelectionCount);
+                replacement.ThumbnailClicked += GalleryCard_ThumbnailClicked;
+                replacement.SelectionChanged += GalleryCard_SelectionChanged;
+                GalleryPanel.Children[slotIndex] = replacement;
+                galleryCards[slotIndex] = replacement;
+                replacementIndex++;
             }
 
-            GalleryCard replacement = new GalleryCard(replacements[replacementIndex], thumbnailService, MaxSelectionCount);
-            replacement.ThumbnailClicked += GalleryCard_ThumbnailClicked;
-            replacement.SelectionChanged += GalleryCard_SelectionChanged;
-            GalleryPanel.Children[slotIndex] = replacement;
-            galleryCards[slotIndex] = replacement;
-            replacementIndex++;
+            GalleryHeaderTextBlock.Text = GalleryHeaderTemplate();
+            SetStatus("Replaced " + replacementIndex + " empty slot" + (replacementIndex == 1 ? string.Empty : "s") + " with new random memes.");
         }
-
-        GalleryHeaderTextBlock.Text = GalleryHeaderTemplate();
-        SetStatus("Replaced " + replacementIndex + " empty slot" + (replacementIndex == 1 ? string.Empty : "s") + " with new random memes.");
+        finally
+        {
+            galleryMutex.Release();
+        }
     }
 
     // ── Viewer ──
@@ -345,12 +390,10 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
     private void ShowViewerMedia(MediaFileInfo media)
     {
         ViewerMediaErrorTextBlock.Visibility = Visibility.Collapsed;
-        ViewerImage.Visibility = Visibility.Collapsed;
         ViewerImage.Source = null;
-        ViewerVideo.Stop();
-        ViewerVideo.Close();
-        ViewerVideo.Source = null;
-        ViewerVideo.Visibility = Visibility.Collapsed;
+        ViewerImage.Visibility = Visibility.Collapsed;
+        StopViewerClock();
+        StopViewerVideo();
 
         try
         {
@@ -364,12 +407,29 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
                 fullImage.Freeze();
                 ViewerImage.Source = fullImage;
                 ViewerImage.Visibility = Visibility.Visible;
+                ViewerPlayPauseButton.Visibility = Visibility.Collapsed;
+                ViewerSeekSlider.Visibility = Visibility.Collapsed;
+                ViewerTimeTextBlock.Visibility = Visibility.Collapsed;
+                ViewerMuteButton.Visibility = Visibility.Collapsed;
+                ViewerVolumeSlider.Visibility = Visibility.Collapsed;
             }
             else
             {
-                ViewerVideo.Source = new Uri(media.AbsolutePath, UriKind.Absolute);
+                suppressSeekSliderEvents = true;
+                ViewerSeekSlider.Value = 0;
+                ViewerSeekSlider.Maximum = 100;
+                suppressSeekSliderEvents = false;
+                ViewerTimeTextBlock.Text = "00:00 / 00:00";
+                ViewerPlayPauseButton.Visibility = Visibility.Visible;
+                ViewerPlayPauseButton.Content = "⏸ Pause";
+                ViewerSeekSlider.Visibility = Visibility.Visible;
+                ViewerTimeTextBlock.Visibility = Visibility.Visible;
+                ViewerMuteButton.Visibility = Visibility.Visible;
+                ViewerVolumeSlider.Visibility = Visibility.Visible;
+                ViewerVideo.Volume = ClampVolume(settings.VideoPlaybackVolume);
                 ViewerVideo.Visibility = Visibility.Visible;
-                ViewerVideo.Position = TimeSpan.Zero;
+                isVideoPlaying = true;
+                ViewerVideo.Source = new Uri(media.AbsolutePath, UriKind.Absolute);
                 ViewerVideo.Play();
             }
         }
@@ -387,12 +447,26 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
     private void CloseViewer()
     {
-        ViewerVideo.Stop();
-        ViewerVideo.Close();
-        ViewerVideo.Source = null;
+        StopViewerClock();
+        StopViewerVideo();
         ViewerImage.Source = null;
         ViewerOverlay.Visibility = Visibility.Collapsed;
         viewerCardIndex = -1;
+    }
+
+    private void StopViewerVideo()
+    {
+        isVideoPlaying = false;
+        isSeekDragging = false;
+        ViewerVideo.Stop();
+        ViewerVideo.Close();
+        ViewerVideo.Source = null;
+        ViewerVideo.Visibility = Visibility.Collapsed;
+    }
+
+    private void StopViewerClock()
+    {
+        viewerClock.Stop();
     }
 
     private void ViewerSurface_MouseDown(object sender, MouseButtonEventArgs eventArgs)
@@ -458,31 +532,129 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
     private async Task MarkCurrentViewerCard(MemeHistoryState state)
     {
-        if (viewerCardIndex < 0 || viewerCardIndex >= galleryCards.Count)
+        if (isMutatingGallery)
         {
             return;
         }
 
-        GalleryCard card = galleryCards[viewerCardIndex];
-        MediaFileInfo consumedMedia = card.Media;
-        await RecordHistoryEntryAsync(state, consumedMedia.RelativePath);
-
-        CloseViewer();
-        int cardIndex = FindCardIndex(card);
-        if (cardIndex >= 0)
+        isMutatingGallery = true;
+        try
         {
-            DisposeCardMedia(card);
-            galleryCards[cardIndex] = new GalleryCard(
-                new MediaFileInfo(string.Empty, string.Empty, MediaKind.Unsupported),
-                thumbnailService,
-                MaxSelectionCount,
-                isPlaceholder: true);
-            GalleryPanel.Children[cardIndex] = galleryCards[cardIndex];
+            if (viewerCardIndex < 0 || viewerCardIndex >= galleryCards.Count)
+            {
+                return;
+            }
+
+            GalleryCard card = galleryCards[viewerCardIndex];
+            MediaFileInfo consumedMedia = card.Media;
+            await RecordHistoryEntryAsync(state, consumedMedia.RelativePath);
+
+            await galleryMutex.WaitAsync();
+            try
+            {
+                CloseViewer();
+                viewerCardIndex = -1;
+
+                int cardIndex = FindCardIndex(card);
+                if (cardIndex >= 0)
+                {
+                    DisposeCardMedia(card);
+                    GalleryCard placeholder = CreatePlaceholderCard();
+                    galleryCards[cardIndex] = placeholder;
+                    GalleryPanel.Children[cardIndex] = placeholder;
+                }
+            }
+            finally
+            {
+                galleryMutex.Release();
+            }
+
+            RefreshHistorySummary();
+            UpdateExportButtonStates();
+            await ReplaceConsumedCardsAsync();
+        }
+        finally
+        {
+            isMutatingGallery = false;
+        }
+    }
+
+    /// <summary>Keep/discard every currently-selected card in one pass (batch buttons in the export toolbar).</summary>
+    private async Task MarkSelectedCards(MemeHistoryState state)
+    {
+        List<GalleryCard> selectedCards = new List<GalleryCard>();
+        foreach (GalleryCard card in galleryCards)
+        {
+            if (card.IsPlaceholder || !card.IsSelected)
+            {
+                continue;
+            }
+
+            selectedCards.Add(card);
         }
 
-        RefreshHistorySummary();
-        UpdateExportButtonStates();
-        await ReplaceConsumedCardsAsync();
+        if (isMutatingGallery || selectedCards.Count == 0)
+        {
+            return;
+        }
+
+        isMutatingGallery = true;
+        try
+        {
+            foreach (GalleryCard card in selectedCards)
+            {
+                await RecordHistoryEntryAsync(state, card.Media.RelativePath);
+            }
+
+            await galleryMutex.WaitAsync();
+            try
+            {
+                CloseViewer();
+                viewerCardIndex = -1;
+
+                for (int index = 0; index < galleryCards.Count; index++)
+                {
+                    if (selectedCards.Contains(galleryCards[index]))
+                    {
+                        DisposeCardMedia(galleryCards[index]);
+                        GalleryCard placeholder = CreatePlaceholderCard();
+                        galleryCards[index] = placeholder;
+                        GalleryPanel.Children[index] = placeholder;
+                    }
+                }
+            }
+            finally
+            {
+                galleryMutex.Release();
+            }
+
+            RefreshHistorySummary();
+            UpdateExportButtonStates();
+            await ReplaceConsumedCardsAsync();
+        }
+        finally
+        {
+            isMutatingGallery = false;
+        }
+    }
+
+    private async void KeepAllButton_Click(object sender, RoutedEventArgs eventArgs)
+    {
+        await MarkSelectedCards(MemeHistoryState.Picked);
+    }
+
+    private async void DiscardAllButton_Click(object sender, RoutedEventArgs eventArgs)
+    {
+        await MarkSelectedCards(MemeHistoryState.Discarded);
+    }
+
+    private GalleryCard CreatePlaceholderCard()
+    {
+        return new GalleryCard(
+            new MediaFileInfo(string.Empty, string.Empty, MediaKind.Unsupported),
+            thumbnailService,
+            MaxSelectionCount,
+            isPlaceholder: true);
     }
 
     private int FindCardIndex(GalleryCard card)
@@ -517,6 +689,150 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
     private void ViewerCloseButton_Click(object sender, RoutedEventArgs eventArgs)
     {
         CloseViewer();
+    }
+
+    // ── Video player controls ──
+
+    private void ViewerPlayPauseButton_Click(object sender, RoutedEventArgs eventArgs)
+    {
+        if (ViewerVideo.Visibility != Visibility.Visible || ViewerVideo.Source == null)
+        {
+            return;
+        }
+
+        if (isVideoPlaying)
+        {
+            ViewerVideo.Pause();
+            SetVideoPlaying(false);
+        }
+        else
+        {
+            ViewerVideo.Play();
+            SetVideoPlaying(true);
+        }
+    }
+
+    private void SetVideoPlaying(bool playing)
+    {
+        isVideoPlaying = playing;
+        ViewerPlayPauseButton.Content = playing ? "⏸ Pause" : "▶ Play";
+        if (playing)
+        {
+            viewerClock.Start();
+        }
+        else
+        {
+            viewerClock.Stop();
+        }
+    }
+
+    private void ViewerVideo_MediaOpened(object sender, RoutedEventArgs eventArgs)
+    {
+        if (ViewerVideo.NaturalDuration.HasTimeSpan)
+        {
+            suppressSeekSliderEvents = true;
+            ViewerSeekSlider.Maximum = ViewerVideo.NaturalDuration.TimeSpan.TotalSeconds;
+            suppressSeekSliderEvents = false;
+            viewerClock.Start();
+        }
+    }
+
+    private void ViewerVideo_MediaEnded(object sender, RoutedEventArgs eventArgs)
+    {
+        SetVideoPlaying(false);
+        ViewerPlayPauseButton.Content = "▶ Replay";
+    }
+
+    private void ViewerClock_Tick(object? sender, EventArgs eventArgs)
+    {
+        if (isSeekDragging || ViewerVideo.Source == null || !ViewerVideo.NaturalDuration.HasTimeSpan)
+        {
+            return;
+        }
+
+        suppressSeekSliderEvents = true;
+        ViewerSeekSlider.Value = ViewerVideo.Position.TotalSeconds;
+        suppressSeekSliderEvents = false;
+        ViewerTimeTextBlock.Text = FormatViewerTime(ViewerVideo.Position) + " / " + FormatViewerTime(ViewerVideo.NaturalDuration.TimeSpan);
+    }
+
+    private void ViewerSeekSlider_DragStarted(object sender, System.Windows.Controls.Primitives.DragStartedEventArgs eventArgs)
+    {
+        isSeekDragging = true;
+    }
+
+    private void ViewerSeekSlider_DragCompleted(object sender, System.Windows.Controls.Primitives.DragCompletedEventArgs eventArgs)
+    {
+        isSeekDragging = false;
+        ApplyViewerSeek();
+    }
+
+    private void ViewerSeekSlider_ValueChanged(object sender, System.Windows.Controls.Primitives.RoutedPropertyChangedEventArgs<double> eventArgs)
+    {
+        if (suppressSeekSliderEvents || isSeekDragging)
+        {
+            return;
+        }
+
+        ApplyViewerSeek();
+    }
+
+    private void ApplyViewerSeek()
+    {
+        if (ViewerVideo.Source == null || !ViewerVideo.NaturalDuration.HasTimeSpan)
+        {
+            return;
+        }
+
+        double targetSeconds = ViewerSeekSlider.Value;
+        if (targetSeconds < ViewerVideo.NaturalDuration.TimeSpan.TotalSeconds)
+        {
+            ViewerVideo.Position = TimeSpan.FromSeconds(targetSeconds);
+        }
+    }
+
+    private void ViewerMuteButton_Click(object sender, RoutedEventArgs eventArgs)
+    {
+        bool wasMuted = ViewerVideo.Volume <= 0.0001;
+        double newVolume = wasMuted ? 0.6 : 0.0;
+        ViewerVideo.Volume = newVolume;
+        settings.VideoPlaybackVolume = newVolume;
+        ViewerVolumeSlider.Value = newVolume;
+    }
+
+    private void ViewerVolumeSlider_ValueChanged(object sender, System.Windows.Controls.Primitives.RoutedPropertyChangedEventArgs<double> eventArgs)
+    {
+        if (ViewerVideo == null)
+        {
+            return;
+        }
+
+        double clamped = ClampVolume(eventArgs.NewValue);
+        ViewerVideo.Volume = clamped;
+        settings.VideoPlaybackVolume = clamped;
+        ViewerMuteButton.Content = clamped <= 0.0001 ? "🔇" : "🔊";
+    }
+
+    private static double ClampVolume(double value)
+    {
+        if (value < 0.0)
+        {
+            return 0.0;
+        }
+
+        if (value > 1.0)
+        {
+            return 1.0;
+        }
+
+        return value;
+    }
+
+    private static string FormatViewerTime(TimeSpan time)
+    {
+        return time.Hours > 0
+            ? time.ToString("h\\:mm\\:ss", System.Globalization.CultureInfo.InvariantCulture)
+            : time.ToString("m\\:ss", System.Globalization.CultureInfo.InvariantCulture);
     }
 
     // ── Keyboard handling ──
@@ -748,16 +1064,15 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
     {
         for (int index = galleryCards.Count - 1; index >= 0; index--)
         {
+            string relativePath = galleryCards[index].Media.RelativePath;
             bool isSelected;
-            if (selectedByRelativePath.TryGetValue(galleryCards[index].Media.RelativePath, out isSelected) && isSelected)
+            if (selectedByRelativePath.TryGetValue(relativePath, out isSelected) && isSelected)
             {
                 DisposeCardMedia(galleryCards[index]);
-                galleryCards[index] = new GalleryCard(
-                    new MediaFileInfo(string.Empty, string.Empty, MediaKind.Unsupported),
-                    thumbnailService,
-                    MaxSelectionCount,
-                    isPlaceholder: true);
-                GalleryPanel.Children[index] = galleryCards[index];
+                GalleryCard placeholder = CreatePlaceholderCard();
+                galleryCards[index] = placeholder;
+                GalleryPanel.Children[index] = placeholder;
+                selectedByRelativePath.Remove(relativePath);
             }
         }
 
@@ -784,7 +1099,7 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
                 return;
             }
 
-            thumbnailService.InvalidateCache();
+            thumbnailService.ResetFfmpegResolution();
             await ReloadGalleryAsync();
         }
         else if (firstRun)
@@ -836,6 +1151,7 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
     protected override void OnClosing(System.ComponentModel.CancelEventArgs eventArgs)
     {
         base.OnClosing(eventArgs);
+        CloseViewer();
         DisposeAllCardMedia();
         try
         {
