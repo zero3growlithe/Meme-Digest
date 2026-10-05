@@ -8,7 +8,7 @@ using Microsoft.Win32;
 
 namespace MemeDigest;
 
-public partial class SettingsWindow : Window
+public partial class SettingsWindow : Window, System.Windows.Forms.IWin32Window
 {
     // ── Fields ──
 
@@ -31,6 +31,11 @@ public partial class SettingsWindow : Window
     }
 
     // ── Folder/file pickers ──
+
+    public IntPtr Handle
+    {
+        get { return new System.Windows.Interop.WindowInteropHelper(this).Handle; }
+    }
 
     private void BrowseLibraryButton_Click(object sender, RoutedEventArgs eventArgs)
     {

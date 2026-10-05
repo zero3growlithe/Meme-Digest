@@ -12,7 +12,7 @@ using System.Windows.Media.Imaging;
 
 namespace MemeDigest;
 
-public partial class MainWindow : Window
+public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 {
     // ── Constants ──
 
@@ -72,6 +72,13 @@ public partial class MainWindow : Window
     private void UpdateTitle()
     {
         Title = nameof(MemeDigest) + " — " + settings.CurrentUserProfile;
+    }
+
+    // ── WinForms interop (folder dialog owner) ──
+
+    public IntPtr Handle
+    {
+        get { return new System.Windows.Interop.WindowInteropHelper(this).Handle; }
     }
 
     private void RefreshHistorySummary()
