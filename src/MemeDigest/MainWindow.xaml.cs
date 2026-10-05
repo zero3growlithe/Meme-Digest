@@ -269,6 +269,18 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
     private void UpdateExportButtonStates()
     {
         bool hasSelection = GetSelectedAbsolutePaths().Count > 0;
+        bool hasSelectableCard = false;
+        foreach (GalleryCard card in galleryCards)
+        {
+            if (!card.IsPlaceholder && !card.IsSelected)
+            {
+                hasSelectableCard = true;
+                break;
+            }
+        }
+
+        SelectAllButton.IsEnabled = hasSelectableCard;
+        DeselectAllButton.IsEnabled = hasSelection;
         KeepAllButton.IsEnabled = hasSelection;
         DiscardAllButton.IsEnabled = hasSelection;
         RevealSelectedButton.IsEnabled = hasSelection;
@@ -646,6 +658,38 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
     private async void DiscardAllButton_Click(object sender, RoutedEventArgs eventArgs)
     {
         await MarkSelectedCards(MemeHistoryState.Discarded);
+    }
+
+    private void SelectAllButton_Click(object sender, RoutedEventArgs eventArgs)
+    {
+        int selectedCount = GetSelectedAbsolutePaths().Count;
+        foreach (GalleryCard card in galleryCards)
+        {
+            if (card.IsPlaceholder || card.IsSelected)
+            {
+                continue;
+            }
+
+            if (selectedCount >= MaxSelectionCount)
+            {
+                SetStatus("Selection limit reached (" + MaxSelectionCount + ") — deselect something first.");
+                break;
+            }
+
+            card.SetSelected(true);
+            selectedCount++;
+        }
+    }
+
+    private void DeselectAllButton_Click(object sender, RoutedEventArgs eventArgs)
+    {
+        foreach (GalleryCard card in galleryCards)
+        {
+            if (!card.IsPlaceholder && card.IsSelected)
+            {
+                card.SetSelected(false);
+            }
+        }
     }
 
     private GalleryCard CreatePlaceholderCard()

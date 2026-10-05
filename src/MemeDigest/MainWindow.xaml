@@ -149,6 +149,8 @@
         <Border DockPanel.Dock="Top" Background="#FF18181F" Padding="12,6" BorderBrush="#FF26262E" BorderThickness="0,0,0,1">
             <WrapPanel>
                 <TextBlock Text="Selected:" Style="{StaticResource ToolBarTextStyle}" />
+                <Button x:Name="SelectAllButton" Content="☑ Select all" Style="{StaticResource ToolBarButtonStyle}" Click="SelectAllButton_Click" />
+                <Button x:Name="DeselectAllButton" Content="☐ Deselect all" Style="{StaticResource ToolBarButtonStyle}" Click="DeselectAllButton_Click" />
                 <Button x:Name="KeepAllButton" Content="❤ Keep all selected" Style="{StaticResource ToolBarButtonStyle}" Click="KeepAllButton_Click" />
                 <Button x:Name="DiscardAllButton" Content="✕ Discard all selected" Style="{StaticResource ToolBarButtonStyle}" Click="DiscardAllButton_Click" />
                 <Button x:Name="RevealSelectedButton" Content="Reveal in folders" Style="{StaticResource ToolBarButtonStyle}" Click="RevealSelectedButton_Click" />

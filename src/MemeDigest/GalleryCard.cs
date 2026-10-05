@@ -40,6 +40,12 @@ public sealed class GalleryCard : UserControl
         get { return isPlaceholder; }
     }
 
+    /// <summary>Sets the selection checkbox state directly (used by select-all / deselect-all).</summary>
+    public void SetSelected(bool isSelected)
+    {
+        selectCheckBox.IsChecked = isSelected;
+    }
+
     // ── Fields ──
 
     private readonly ThumbnailService thumbnailService;
