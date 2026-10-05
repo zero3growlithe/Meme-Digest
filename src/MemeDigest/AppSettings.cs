@@ -60,6 +60,8 @@ public sealed class AppSettings
         }
     }
 
+    public string HistoryDirectory { get; set; } = string.Empty;
+
     public string ThumbnailDirectory { get; set; } = string.Empty;
 
     public int DrawCount { get; set; } = DefaultDrawCount;
