@@ -183,7 +183,7 @@
 
                     <Grid Grid.Row="0" Margin="12,12,12,4">
                         <Image x:Name="ViewerImage" Stretch="Uniform" StretchDirection="DownOnly" Visibility="Collapsed" MouseDown="ViewerSurface_MouseDown" />
-                        <MediaElement x:Name="ViewerVideo" LoadedBehavior="Play" UnloadedBehavior="Close" ScrubbingEnabled="True" Stretch="Uniform" Visibility="Collapsed" MediaFailed="ViewerVideo_MediaFailed" MouseDown="ViewerSurface_MouseDown" />
+                        <MediaElement x:Name="ViewerVideo" LoadedBehavior="Manual" UnloadedBehavior="Manual" ScrubbingEnabled="True" Stretch="Uniform" Visibility="Collapsed" MediaFailed="ViewerVideo_MediaFailed" MouseDown="ViewerSurface_MouseDown" />
                         <TextBlock x:Name="ViewerMediaErrorTextBlock" Foreground="#FFC06060" HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap" Visibility="Collapsed" />
                     </Grid>
 
