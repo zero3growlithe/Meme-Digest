@@ -1,0 +1,183 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text.Json;
+
+namespace MemeDigest;
+
+public sealed class AppSettings
+{
+    // ── Constants ──
+
+    public const string SettingsFileName = "settings.json";
+
+    public const int DefaultDrawCount = 12;
+
+    public const string DefaultProfileName = "Default";
+
+    private static readonly JsonSerializerOptions SerializerOptions = new JsonSerializerOptions
+    {
+        WriteIndented = true
+    };
+
+    // ── Persisted properties ──
+
+    public string LibraryPath { get; set; } = string.Empty;
+
+    public string HistoryDirectory { get; set; } = string.Empty;
+
+    public string ThumbnailDirectory { get; set; } = string.Empty;
+
+    public int DrawCount { get; set; } = DefaultDrawCount;
+
+    public string FfmpegExecutablePath { get; set; } = "ffmpeg";
+
+    public List<string> UserProfiles { get; set; } = new List<string> { DefaultProfileName };
+
+    public string CurrentUserProfile { get; set; } = DefaultProfileName;
+
+    public List<string> ImageExtensions { get; set; } = new List<string>
+    {
+        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff"
+    };
+
+    public List<string> VideoExtensions { get; set; } = new List<string>
+    {
+        ".mp4", ".m4v", ".mkv", ".webm", ".mov", ".avi", ".wmv", ".mpeg", ".mpg"
+    };
+
+    // ── Derived locations ──
+
+    public static string SettingsDirectory
+    {
+        get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), nameof(MemeDigest)); }
+    }
+
+    public static string DefaultSettingsFilePath
+    {
+        get { return Path.Combine(SettingsDirectory, SettingsFileName); }
+    }
+
+    public static string DefaultHistoryDirectory
+    {
+        get { return Path.Combine(SettingsDirectory, "History"); }
+    }
+
+    public static string DefaultThumbnailDirectory
+    {
+        get { return Path.Combine(SettingsDirectory, "Thumbnails"); }
+    }
+
+    public bool IsLibraryPathValid
+    {
+        get { return !string.IsNullOrWhiteSpace(LibraryPath) && Directory.Exists(LibraryPath); }
+    }
+
+    public bool HasVideoExtensions
+    {
+        get { return VideoExtensions != null && VideoExtensions.Count > 0; }
+    }
+
+    // ── Persistence ──
+
+    public static AppSettings LoadOrCreate()
+    {
+        try
+        {
+            string settingsFilePath = DefaultSettingsFilePath;
+            if (File.Exists(settingsFilePath))
+            {
+                string json = File.ReadAllText(settingsFilePath);
+                AppSettings? loaded = JsonSerializer.Deserialize<AppSettings>(json, SerializerOptions);
+                if (loaded != null)
+                {
+                    loaded.FillDefaults();
+                    return loaded;
+                }
+            }
+        }
+        catch (Exception)
+        {
+            // Corrupt settings fall back to defaults; the user can edit them again.
+        }
+
+        AppSettings created = new AppSettings();
+        created.FillDefaults();
+        return created;
+    }
+
+    public void Save()
+    {
+        Directory.CreateDirectory(SettingsDirectory);
+        string json = JsonSerializer.Serialize(this, SerializerOptions);
+        File.WriteAllText(DefaultSettingsFilePath, json);
+    }
+
+    public bool IsKnownImageExtension(string extension)
+    {
+        return ContainsIgnoreCase(ImageExtensions, extension);
+    }
+
+    public bool IsKnownVideoExtension(string extension)
+    {
+        return ContainsIgnoreCase(VideoExtensions, extension);
+    }
+
+    public void FillDefaults()
+    {
+        if (string.IsNullOrWhiteSpace(HistoryDirectory))
+        {
+            HistoryDirectory = DefaultHistoryDirectory;
+        }
+
+        if (string.IsNullOrWhiteSpace(ThumbnailDirectory))
+        {
+            ThumbnailDirectory = DefaultThumbnailDirectory;
+        }
+
+        if (DrawCount <= 0)
+        {
+            DrawCount = DefaultDrawCount;
+        }
+
+        if (UserProfiles == null || UserProfiles.Count == 0)
+        {
+            UserProfiles = new List<string> { DefaultProfileName };
+        }
+
+        if (string.IsNullOrWhiteSpace(CurrentUserProfile) || !UserProfiles.Contains(CurrentUserProfile))
+        {
+            CurrentUserProfile = UserProfiles[0];
+        }
+
+        if (ImageExtensions == null || ImageExtensions.Count == 0)
+        {
+            ImageExtensions = new List<string> { ".png", ".jpg", ".jpeg", ".gif", ".bmp" };
+        }
+
+        if (VideoExtensions == null)
+        {
+            VideoExtensions = new List<string>();
+        }
+    }
+
+    // ── Helpers ──
+
+    private static bool ContainsIgnoreCase(List<string> values, string value)
+    {
+        if (values == null || string.IsNullOrEmpty(value))
+        {
+            return false;
+        }
+
+        foreach (string candidate in values)
+        {
+            if (string.Equals(candidate, value, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+}

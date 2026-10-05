@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AssemblyName>MemeDigest</AssemblyName>
+    <RootNamespace>MemeDigest</RootNamespace>
+    <Nullable>enable</Nullable>
+    <LangVersion>12</LangVersion>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <Version>0.1.0</Version>
+    <AssemblyTitle>Meme Digest</AssemblyTitle>
+    <Product>Meme Digest</Product>
+    <Description>Draw random memes from a media library, review them in a gallery and share the keepers via Discord.</Description>
+  </PropertyGroup>
+
+  <!-- Build fingerprint for crash.log ("build: <sha>") — GITHUB_SHA is set only on CI builds. -->
+  <Target Name="WriteBuildInfo" AfterTargets="PrepareForBuild">
+    <WriteLinesToFile File="$(IntermediateOutputPath)BuildInfo.g.cs"
+                      Lines="namespace MemeDigest { internal static class BuildInfo { public const string Sha = &quot;$(GITHUB_SHA)&quot;%3B } }"
+                      Overwrite="true" />
+    <ItemGroup>
+      <Compile Include="$(IntermediateOutputPath)BuildInfo.g.cs" />
+    </ItemGroup>
+  </Target>
+
+</Project>

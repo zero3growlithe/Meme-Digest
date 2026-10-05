@@ -1,0 +1,35 @@
+name: Build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build
+        run: dotnet build src/MemeDigest/MemeDigest.csproj -c Release -p:NuGetAudit=false --nologo -v q
+
+      - name: Publish framework-dependent (requires .NET 8 Desktop Runtime)
+        run: dotnet publish src/MemeDigest/MemeDigest.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=false -p:NuGetAudit=false -o publish
+
+      - name: Zip publish output
+        shell: pwsh
+        run: Compress-Archive -Path publish/* -DestinationPath MemeDigest-win-x64.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MemeDigest-win-x64
+          path: MemeDigest-win-x64.zip
+          retention-days: 30
