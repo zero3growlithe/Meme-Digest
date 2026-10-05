@@ -6,13 +6,43 @@
         SizeToContent="Height"
         ResizeMode="NoResize"
         WindowStartupLocation="CenterOwner"
-        Background="#FF14141A">
+        Background="#FF14141A"
+        UseLayoutRounding="True">
+    <Window.Resources>
+        <Style x:Key="DialogButtonStyle" TargetType="Button">
+            <Setter Property="Background" Value="#FF2A2A36" />
+            <Setter Property="Foreground" Value="#FFE8E8F0" />
+            <Setter Property="BorderBrush" Value="#FF3C3C4E" />
+            <Setter Property="Padding" Value="14,6" />
+            <Setter Property="Margin" Value="6,0,0,0" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="ButtonBorder" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1" CornerRadius="4">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="{TemplateBinding Padding}" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ButtonBorder" Property="Background" Value="#FF3A3A4C" />
+                                <Setter Property="Foreground" Value="#FFE8E8F0" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="ButtonBorder" Property="Background" Value="#FF44445A" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
     <StackPanel Margin="18">
         <TextBlock Text="Profile name:" Foreground="#FFB8B8C8" Margin="0,0,0,6" />
         <TextBox x:Name="ProfileNameBox" Padding="4,4" Background="#FF20202A" Foreground="#FFE8E8F0" BorderBrush="#FF3C3C4E" CaretBrush="#FFE8E8F0" />
         <WrapPanel HorizontalAlignment="Right" Margin="0,14,0,0">
-            <Button x:Name="OkButton" Content="OK" Width="80" IsDefault="True" Background="#FF2A2A36" Foreground="#FFE8E8F0" BorderBrush="#FF3C3C4E" Padding="10,5" Margin="6,0,0,0" Click="OkButton_Click" />
-            <Button Content="Cancel" Width="80" IsCancel="True" Background="#FF2A2A36" Foreground="#FFE8E8F0" BorderBrush="#FF3C3C4E" Padding="10,5" Margin="6,0,0,0" />
+            <Button x:Name="OkButton" Content="OK" Width="80" IsDefault="True" Style="{StaticResource DialogButtonStyle}" Click="OkButton_Click" />
+            <Button Content="Cancel" Width="80" IsCancel="True" Style="{StaticResource DialogButtonStyle}" />
         </WrapPanel>
     </StackPanel>
 </Window>
