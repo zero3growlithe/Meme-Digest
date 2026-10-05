@@ -307,16 +307,35 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
     private void UpdateExportButtonStates()
     {
-        bool hasSelection = GetSelectedAbsolutePaths().Count > 0;
+        // All decisions read the ACTIVE tab's cards. (Mixed sources used to leave
+        // buttons stuck disabled on Kept/Discarded, because the check peeked at the
+        // drawer's stale batch instead of the visible cards.)
+        List<GalleryCard> activeCards = ActiveCards();
+        bool hasSelection = false;
         bool hasSelectableCard = false;
-        foreach (GalleryCard card in galleryCards)
+        foreach (GalleryCard card in activeCards)
         {
-            if (!card.IsPlaceholder && !card.IsSelected)
+            if (card.IsPlaceholder)
+            {
+                continue;
+            }
+
+            if (card.IsSelected)
+            {
+                hasSelection = true;
+            }
+            else
             {
                 hasSelectableCard = true;
+            }
+
+            if (hasSelection && hasSelectableCard)
+            {
                 break;
             }
         }
+
+        // Keep/discard-all only act on the drawer; on history tabs they are a hint.
 
         SelectAllButton.IsEnabled = hasSelectableCard;
         DeselectAllButton.IsEnabled = hasSelection;
@@ -870,6 +889,7 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
         if (selectedCards.Count == 0)
         {
+            SetStatus("Nothing selected — tick one or more cards first (or press Select all).");
             return;
         }
 
