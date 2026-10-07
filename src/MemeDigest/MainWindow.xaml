@@ -259,6 +259,7 @@
                             <TextBlock x:Name="ViewerCaptionTextBlock" Foreground="#FFB8B8C8" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="10,0" />
                             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
                                 <Button x:Name="ViewerCopyButton" Content="⧉ Copy" Style="{StaticResource ToolBarButtonStyle}" Click="ViewerCopyButton_Click" ToolTip="Copy the file to the clipboard (Ctrl+C in viewer) — paste into Discord or Explorer" />
+                                <CheckBox x:Name="ViewerFitToWindowCheckBox" Content="Always fit to window" Foreground="#FFB8B8C8" VerticalAlignment="Center" Margin="6,0" Checked="ViewerFitToWindowCheckBox_CheckedChanged" Unchecked="ViewerFitToWindowCheckBox_CheckedChanged" ToolTip="Zoom smaller graphics in so their height fills the viewer window (images only)" />
                                 <Button x:Name="ViewerRevealButton" Content="📁 Select in Explorer" Style="{StaticResource ToolBarButtonStyle}" Click="ViewerRevealButton_Click" ToolTip="Open the file's folder and select the file" />
                                 <Button Content="Close (Esc)" Style="{StaticResource ToolBarButtonStyle}" Click="ViewerCloseButton_Click" />
                             </StackPanel>

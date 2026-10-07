@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Collections.Generic;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
@@ -21,6 +22,14 @@ public sealed class ThumbnailService
     private ImageSource? videoPlaceholder;
 
     private string? resolvedFfmpegPath;
+
+    /// <summary>Decoded-thumbnail cache: fingerprint → frozen ImageSource (~320px each).
+    /// Bounded; a re-carded meme decodes once per session, not once per card build.</summary>
+    private readonly Dictionary<string, ImageSource> decodedCache = new Dictionary<string, ImageSource>(StringComparer.Ordinal);
+
+    private const int DecodedCacheCapacity = 4096;
+
+    private readonly object decodedCacheLock = new object();
 
     // ── Construction ──
 
@@ -45,12 +54,38 @@ public sealed class ThumbnailService
 
     public async Task<ImageSource?> GetThumbnailAsync(string absolutePath, MediaKind kind)
     {
-        if (kind == MediaKind.Image)
+        string fingerprint = ComputeFingerprint(absolutePath);
+        lock (decodedCacheLock)
         {
-            return await Task.Run(() => TryCreateImageThumbnail(absolutePath)).ConfigureAwait(true);
+            if (decodedCache.TryGetValue(fingerprint, out ImageSource? cached))
+            {
+                return cached;
+            }
         }
 
-        return await Task.Run(() => TryCreateVideoThumbnail(absolutePath)).ConfigureAwait(true);
+        ImageSource? thumbnail = kind == MediaKind.Image
+            ? await Task.Run(() => TryCreateImageThumbnail(absolutePath)).ConfigureAwait(true)
+            : await Task.Run(() => TryCreateVideoThumbnail(absolutePath)).ConfigureAwait(true);
+
+        if (thumbnail != null)
+        {
+            lock (decodedCacheLock)
+            {
+                if (decodedCache.Count >= DecodedCacheCapacity)
+                {
+                    // Drop arbitrary stale entries (Dictionary order) — enough to unblock growth.
+                    foreach (string key in decodedCache.Keys)
+                    {
+                        decodedCache.Remove(key);
+                        break;
+                    }
+                }
+
+                decodedCache[fingerprint] = thumbnail;
+            }
+        }
+
+        return thumbnail;
     }
 
     public ImageSource GetVideoPlaceholder()
@@ -69,6 +104,11 @@ public sealed class ThumbnailService
     /// </summary>
     public void InvalidateCache()
     {
+        lock (decodedCacheLock)
+        {
+            decodedCache.Clear();
+        }
+
         try
         {
             if (!Directory.Exists(settings.ThumbnailDirectory))
@@ -139,21 +179,22 @@ public sealed class ThumbnailService
         return null;
     }
 
-    private static string BuildPosterPath(string thumbnailDirectory, string absolutePath)
+    /// <summary>Stable file fingerprint (path + length + mtime) backing poster names and decode-cache keys.</summary>
+    private static string ComputeFingerprint(string absolutePath)
     {
-        var fileInfo = new FileInfo(absolutePath);
+        FileInfo fileInfo = new FileInfo(absolutePath);
         long length = fileInfo.Exists ? fileInfo.Length : 0;
         long lastWriteTicks = fileInfo.Exists ? fileInfo.LastWriteTimeUtc.Ticks : 0;
 
         string fingerprintSource = absolutePath.ToUpperInvariant() + "|" + length.ToString(CultureInfo.InvariantCulture) + "|" + lastWriteTicks.ToString(CultureInfo.InvariantCulture);
-        string fingerprint;
-        using (SHA256 sha256 = SHA256.Create())
-        {
-            byte[] hash = sha256.ComputeHash(System.Text.Encoding.UTF8.GetBytes(fingerprintSource));
-            fingerprint = Convert.ToHexString(hash).Substring(0, 24).ToLowerInvariant();
-        }
+        using SHA256 sha256 = SHA256.Create();
+        byte[] hash = sha256.ComputeHash(System.Text.Encoding.UTF8.GetBytes(fingerprintSource));
+        return Convert.ToHexString(hash).Substring(0, 24).ToLowerInvariant();
+    }
 
-        return Path.Combine(thumbnailDirectory, "poster-" + fingerprint + ".jpg");
+    private static string BuildPosterPath(string thumbnailDirectory, string absolutePath)
+    {
+        return Path.Combine(thumbnailDirectory, "poster-" + ComputeFingerprint(absolutePath) + ".jpg");
     }
 
     private string? TryGeneratePosterWithFfmpeg(string absolutePath)

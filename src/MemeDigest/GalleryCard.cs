@@ -64,6 +64,10 @@ public sealed class GalleryCard : UserControl
 
     private bool isPlaceholder;
 
+    private bool hasThumbnailLoaded;
+
+    private bool isThumbnailLoadQueued;
+
     // ── Construction ──
 
     public GalleryCard(MediaFileInfo media, ThumbnailService thumbnailService, int maxSelectionCount, bool isPlaceholder = false)
@@ -185,7 +189,6 @@ public sealed class GalleryCard : UserControl
         else
         {
             fileNameTextBlock.Text = GetFileName();
-            Loaded += GalleryCard_Loaded;
         }
     }
 
@@ -202,6 +205,77 @@ public sealed class GalleryCard : UserControl
         thumbnailImage.Source = null;
     }
 
+    /// <summary>true once the thumbnail decode finished (success or handled failure); skips re-queues.</summary>
+    public bool HasThumbnailLoaded
+    {
+        get { return hasThumbnailLoaded; }
+    }
+
+    /// <summary>true while a LoadThumbnail call is in flight (decode started but not finished) —
+    /// lets the dispatcher pump skip cards already being decoded instead of issuing duplicate decodes.</summary>
+    public bool IsThumbnailLoadQueued
+    {
+        get { return isThumbnailLoadQueued; }
+    }
+
+    /// <summary>
+    /// Loads the thumbnail now: caches WIC decodes in the shared thumbnail cache and,
+    /// for videos, reuses the last generated poster when the file's fingerprint is
+    /// unchanged (no ffmpeg round-trip). Runs its awaits back on the UI thread.
+    /// </summary>
+    public async void LoadThumbnail()
+    {
+        // Claim synchronously before the first await so concurrent pump sweeps see
+        // this card as covered; every completion path below also sets hasThumbnailLoaded.
+        isThumbnailLoadQueued = true;
+        MediaFileInfo mediaSnapshot = Media;
+        try
+        {
+            ImageSource? thumbnail = await thumbnailService.GetThumbnailAsync(mediaSnapshot.AbsolutePath, mediaSnapshot.Kind);
+            if (!ReferenceEquals(Media, mediaSnapshot))
+            {
+                // Media was reassigned mid-decode (e.g. card repurposed for another meme);
+                // release the claim so a later pump sweep re-attempts for the new media.
+                isThumbnailLoadQueued = false;
+                return;
+            }
+
+            if (thumbnail != null)
+            {
+                hasThumbnailLoaded = true;
+                thumbnailImage.Source = thumbnail;
+                thumbnailImage.Visibility = Visibility.Visible;
+                if (mediaSnapshot.Kind == MediaKind.Video)
+                {
+                    videoBadgeBorder.Visibility = Visibility.Visible;
+                }
+            }
+            else if (mediaSnapshot.Kind == MediaKind.Video)
+            {
+                hasThumbnailLoaded = true;
+                thumbnailImage.Source = thumbnailService.GetVideoPlaceholder();
+                thumbnailImage.Visibility = Visibility.Visible;
+                videoBadgeBorder.Visibility = Visibility.Visible;
+                tileMessageTextBlock.Text = "no preview" + Environment.NewLine + (thumbnailService.WasFfmpegFound
+                    ? "(poster generation failed)"
+                    : "(ffmpeg not found — set its path in Settings)");
+                tileMessageTextBlock.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                hasThumbnailLoaded = true;
+                tileMessageTextBlock.Text = "preview unavailable";
+                tileMessageTextBlock.Visibility = Visibility.Visible;
+            }
+        }
+        catch (Exception exception)
+        {
+            hasThumbnailLoaded = true;
+            tileMessageTextBlock.Text = "preview failed:" + Environment.NewLine + exception.Message;
+            tileMessageTextBlock.Visibility = Visibility.Visible;
+        }
+    }
+
     // ── Event handlers ──
 
     private void TileBorder_MouseLeftButtonDown(object sender, MouseButtonEventArgs eventArgs)
@@ -215,50 +289,6 @@ public sealed class GalleryCard : UserControl
     private void SelectCheckBox_CheckedChanged(object sender, RoutedEventArgs eventArgs)
     {
         SelectionChanged?.Invoke(this);
-    }
-
-    private async void GalleryCard_Loaded(object sender, RoutedEventArgs eventArgs)
-    {
-        Loaded -= GalleryCard_Loaded;
-        MediaFileInfo mediaSnapshot = Media;
-        try
-        {
-            ImageSource? thumbnail = await thumbnailService.GetThumbnailAsync(mediaSnapshot.AbsolutePath, mediaSnapshot.Kind);
-            if (!ReferenceEquals(Media, mediaSnapshot))
-            {
-                return;
-            }
-
-            if (thumbnail != null)
-            {
-                thumbnailImage.Source = thumbnail;
-                thumbnailImage.Visibility = Visibility.Visible;
-                if (mediaSnapshot.Kind == MediaKind.Video)
-                {
-                    videoBadgeBorder.Visibility = Visibility.Visible;
-                }
-            }
-            else if (mediaSnapshot.Kind == MediaKind.Video)
-            {
-                thumbnailImage.Source = thumbnailService.GetVideoPlaceholder();
-                thumbnailImage.Visibility = Visibility.Visible;
-                videoBadgeBorder.Visibility = Visibility.Visible;
-                tileMessageTextBlock.Text = "no preview" + Environment.NewLine + (thumbnailService.WasFfmpegFound
-                    ? "(poster generation failed)"
-                    : "(ffmpeg not found — set its path in Settings)");
-                tileMessageTextBlock.Visibility = Visibility.Visible;
-            }
-            else
-            {
-                tileMessageTextBlock.Text = "preview unavailable";
-                tileMessageTextBlock.Visibility = Visibility.Visible;
-            }
-        }
-        catch (Exception exception)
-        {
-            tileMessageTextBlock.Text = "preview failed:" + Environment.NewLine + exception.Message;
-            tileMessageTextBlock.Visibility = Visibility.Visible;
-        }
     }
 
     // ── Helpers ──

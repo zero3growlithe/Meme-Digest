@@ -18,6 +18,12 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
     private const int MaxSelectionCount = 64;
 
+    /// <summary>Thumbnails decoded per dispatcher pump while a panel streams in.</summary>
+    private const int ThumbnailBatchSize = 8;
+
+    /// <summary>Delay between thumbnail batches (ms) — lets input/rendering interleave.</summary>
+    private const int ThumbnailBatchDelayMs = 60;
+
     // ── Fields ──
 
     private readonly AppSettings settings;
@@ -80,6 +86,16 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
     /// <summary>Selection state per tab: Drawer uses selectedByRelativePath; history tabs use historySelection.</summary>
     private readonly HashSet<string> historySelection = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>Kept/Discarded tab card caches: switching back reattaches the cached cards instead
+    /// of rebuilding everything; invalidated whenever history changes.</summary>
+    private List<GalleryCard>? keptCardsCache;
+
+    private List<GalleryCard>? discardedCardsCache;
+
+    /// <summary>Posted once per pump chain per panel — guards double pumping while allowing
+    /// distinct panels (drawer vs history tabs) to pump concurrently.</summary>
+    private readonly HashSet<System.Windows.Controls.Panel> activeThumbnailPumpPanels = new HashSet<System.Windows.Controls.Panel>();
+
     // ── Construction ──
 
     public MainWindow()
@@ -95,6 +111,7 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
         ProfileComboBox.ItemsSource = settings.UserProfiles;
         ProfileComboBox.SelectedItem = settings.CurrentUserProfile;
         DrawCountBox.Text = settings.DrawCount.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        ViewerFitToWindowCheckBox.IsChecked = settings.AlwaysFitToWindow;
         UpdateTitle();
         RefreshHistorySummary();
         UpdateExportButtonStates();
@@ -148,6 +165,110 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
     private void SetStatus(string message)
     {
         StatusLeftTextBlock.Text = message;
+    }
+
+    // ── Thumbnail loading pump ──
+
+    /// <summary>
+    /// Loads thumbnails for the visible cards in controlled batches: one batch per
+    /// Loaded-priority dispatcher frame keeps the UI responsive while hundreds of
+    /// decodes stream in; an Idle-priority pass sweeps stragglers that scrolled in.
+    /// </summary>
+    private void DispatchThumbnailJobs(System.Windows.Controls.Panel panel)
+    {
+        // Per-panel claim: a re-entrant dispatch for the same panel is skipped, while a
+        // dispatch for another panel still starts its own chain (a global flag would
+        // strand one panel's loads behind another's still-running chain).
+        if (!activeThumbnailPumpPanels.Add(panel))
+        {
+            return;
+        }
+
+        _ = PumpThumbnailBatchAsync(panel);
+    }
+
+    private async Task PumpThumbnailBatchAsync(System.Windows.Controls.Panel panel)
+    {
+        try
+        {
+            await Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, new Action(() =>
+            {
+                List<GalleryCard> pending = CollectPendingThumbnails(panel, ThumbnailBatchSize);
+                for (int index = 0; index < pending.Count; index++)
+                {
+                    pending[index].LoadThumbnail();
+                }
+            }));
+        }
+        finally
+        {
+            activeThumbnailPumpPanels.Remove(panel);
+        }
+
+        // Follow-up batch while work remains, then one idle sweep (covers scroll-ins).
+        if (CollectPendingThumbnails(panel, 1).Count > 0)
+        {
+            await Task.Delay(ThumbnailBatchDelayMs);
+            DispatchThumbnailJobs(panel);
+        }
+        else
+        {
+            _ = Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.ApplicationIdle, new Action(() =>
+            {
+                if (CollectPendingThumbnails(panel, ThumbnailBatchSize).Count > 0)
+                {
+                    DispatchThumbnailJobs(panel);
+                }
+            }));
+        }
+    }
+
+    private List<GalleryCard> CollectPendingThumbnails(System.Windows.Controls.Panel panel, int limit)
+    {
+        List<GalleryCard> pending = new List<GalleryCard>();
+        foreach (object child in panel.Children)
+        {
+            // IsThumbnailLoadQueued skips cards whose decode is in flight, so pump sweeps
+            // between batches do not re-issue duplicate decodes for still-pending cards.
+            if (child is GalleryCard card && !card.IsPlaceholder && !card.HasThumbnailLoaded && !card.IsThumbnailLoadQueued)
+            {
+                pending.Add(card);
+                if (pending.Count >= limit)
+                {
+                    break;
+                }
+            }
+        }
+
+        return pending;
+    }
+
+    /// <summary>Reattaches a cached history tab's cards to its panel without rebuilding any card.</summary>
+    private void AttachCachedHistoryTab(System.Windows.Controls.Panel targetPanel, List<GalleryCard> cachedCards)
+    {
+        targetPanel.Children.Clear();
+        for (int index = 0; index < cachedCards.Count; index++)
+        {
+            targetPanel.Children.Add(cachedCards[index]);
+        }
+
+        // The selection set is shared by both history tabs and the OTHER tab's reload
+        // cleared it while these cards were detached — restore it from the attached
+        // cards' actual checkbox states, or Reset selected would act on stale paths.
+        historySelection.Clear();
+        for (int index = 0; index < cachedCards.Count; index++)
+        {
+            GalleryCard card = cachedCards[index];
+            if (!card.IsPlaceholder && card.IsSelected)
+            {
+                historySelection.Add(card.Media.RelativePath);
+            }
+        }
+
+        // Resume the pump for cards stranded by a panel clear mid-pump (their chain ended
+        // against the detached panel); loaded/claimed cards are skipped, so this is a no-op
+        // when everything already finished decoding.
+        DispatchThumbnailJobs(targetPanel);
     }
 
     // ── Drawing ──
@@ -260,6 +381,7 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
         GalleryHeaderTextBlock.Text = GalleryHeaderTemplate();
         UpdateExportButtonStates();
+        DispatchThumbnailJobs(GalleryPanel);
         return Task.CompletedTask;
     }
 
@@ -445,6 +567,8 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
         {
             GalleryPanel.Children.Add(card);
         }
+
+        DispatchThumbnailJobs(GalleryPanel);
     }
 
     // ── History tabs (Kept / Discarded) ──
@@ -487,10 +611,12 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
         if (requestedTab == GalleryTab.Kept)
         {
             ReloadHistoryTabData(KeptPanel, KeptHeaderTextBlock, keptCards, state, existingRelativePaths);
+            keptCardsCache = new List<GalleryCard>(keptCards);
         }
         else if (requestedTab == GalleryTab.Discarded)
         {
             ReloadHistoryTabData(DiscardedPanel, DiscardedHeaderTextBlock, discardedCards, state, existingRelativePaths);
+            discardedCardsCache = new List<GalleryCard>(discardedCards);
         }
 
         SetStatus((requestedTab == GalleryTab.Kept ? "Kept" : "Discarded") + " tab loaded: " + (requestedTab == GalleryTab.Kept ? keptCards.Count : discardedCards.Count) + " item(s).");
@@ -527,6 +653,8 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
             targetCards.Add(card);
             targetPanel.Children.Add(card);
         }
+
+        DispatchThumbnailJobs(targetPanel);
 
         targetHeader.Text = (state == MemeHistoryState.Picked ? "Kept: " : "Discarded: ") + targetCards.Count
             + " meme" + (targetCards.Count == 1 ? string.Empty : "s") + " — tick, then Reset selected returns them to the drawer pool";
@@ -571,7 +699,8 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
         // Reset removed entries: the other tab may still show stale copies, so both
         // history panels reload. Reload runs AFTER isMutatingGallery clears (it
-        // early-returns while the flag is up).
+        // early-returns while the flag is up). One save covers the whole batch.
+        InvalidateHistoryTabCaches();
         await Task.Run(() => history.SaveToFile(settings.HistoryDirectory));
         RefreshHistorySummary();
         isMutatingGallery = true;
@@ -629,6 +758,28 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
         ShowViewerMedia(card.Media);
     }
 
+    /// <summary>Applies the "Always fit to window" mode to the viewer image
+    /// (Both = zoom small graphics up to fill the height; DownOnly = never upscale).</summary>
+    private void ApplyViewerFitMode()
+    {
+        bool fitToWindow = settings.AlwaysFitToWindow;
+        ViewerImage.StretchDirection = fitToWindow
+            ? StretchDirection.Both
+            : StretchDirection.DownOnly;
+    }
+
+    private void ViewerFitToWindowCheckBox_CheckedChanged(object sender, RoutedEventArgs eventArgs)
+    {
+        if (settings == null)
+        {
+            return;
+        }
+
+        settings.AlwaysFitToWindow = ViewerFitToWindowCheckBox.IsChecked == true;
+        ApplyViewerFitMode();
+        SaveSettings();
+    }
+
     private void ShowViewerMedia(MediaFileInfo media)
     {
         ViewerMediaErrorTextBlock.Visibility = Visibility.Collapsed;
@@ -648,6 +799,7 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
                 fullImage.EndInit();
                 fullImage.Freeze();
                 ViewerImage.Source = fullImage;
+                ApplyViewerFitMode();
                 ViewerImage.Visibility = Visibility.Visible;
                 ViewerPlayPauseButton.Visibility = Visibility.Collapsed;
                 ViewerSeekSlider.Visibility = Visibility.Collapsed;
@@ -915,8 +1067,10 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
         {
             foreach (GalleryCard card in selectedCards)
             {
-                await RecordHistoryEntryAsync(state, card.Media.RelativePath);
+                RecordHistoryEntry(state, card.Media.RelativePath);
             }
+
+            await SaveHistoryToFileAsync();
 
             CloseViewer();
             viewerCardIndex = -1;
@@ -1009,22 +1163,52 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
         return -1;
     }
 
-    private async Task RecordHistoryEntryAsync(MemeHistoryState state, string relativePath)
+    /// <summary>Drops cached Kept/Discarded tab data — history changed and both views may re-render.</summary>
+    private void InvalidateHistoryTabCaches()
+    {
+        keptCardsCache = null;
+        discardedCardsCache = null;
+    }
+
+    private void RecordHistoryEntry(MemeHistoryState state, string relativePath)
     {
         // Exactly one state per meme: drop stale entries in the other section
         // (legacy dual-written files or an explicit state flip), then record the
-        // section matching the button that was pressed.
+        // section matching the button that was pressed. The tab caches are dropped
+        // only when history content actually changed — a repeat keep/discard that
+        // is already recorded must not force both tabs to rebuild on next switch.
         MemeHistoryState oppositeState = state == MemeHistoryState.Picked
             ? MemeHistoryState.Discarded
             : MemeHistoryState.Picked;
 
-        history.RemoveAll(oppositeState, relativePath);
+        bool historyChanged = false;
+        if (history.Contains(oppositeState, relativePath))
+        {
+            history.RemoveAll(oppositeState, relativePath);
+            historyChanged = true;
+        }
 
         if (!history.Contains(state, relativePath))
         {
             history.Add(state, relativePath, DateTime.UtcNow);
+            historyChanged = true;
         }
 
+        if (historyChanged)
+        {
+            InvalidateHistoryTabCaches();
+        }
+    }
+
+    private async Task RecordHistoryEntryAsync(MemeHistoryState state, string relativePath)
+    {
+        RecordHistoryEntry(state, relativePath);
+        await SaveHistoryToFileAsync();
+    }
+
+    /// <summary>Persists history off the UI thread (already-batched callers pass through).</summary>
+    private async Task SaveHistoryToFileAsync()
+    {
         await Task.Run(() => history.SaveToFile(settings.HistoryDirectory));
     }
 
@@ -1319,6 +1503,7 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
         galleryCards.Clear();
         selectedByRelativePath.Clear();
         ClearHistoryTabPanels(disposeMedia: true);
+        InvalidateHistoryTabCaches();
         activeTab = GalleryTab.Drawer;
         suppressProfileEvents = true;
         DrawerTabButton.IsChecked = true;
@@ -1444,6 +1629,7 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
         galleryCards.Clear();
         selectedByRelativePath.Clear();
         ClearHistoryTabPanels(disposeMedia: true);
+        InvalidateHistoryTabCaches();
         activeTab = GalleryTab.Drawer;
         suppressProfileEvents = true;
         DrawerTabButton.IsChecked = true;
@@ -1531,8 +1717,10 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
                 // remove their cards, then refill empty slots.
                 foreach (string relativePath in relativePaths)
                 {
-                    await RecordHistoryEntryAsync(MemeHistoryState.Picked, relativePath);
+                    RecordHistoryEntry(MemeHistoryState.Picked, relativePath);
                 }
+
+                await SaveHistoryToFileAsync();
 
                 RemoveSelectedCards();
                 await ReplaceConsumedCardsAsync();
@@ -1647,6 +1835,22 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
             ApplyTabVisibility();
             SetStatus("Ready — press Draw for fresh memes.");
         }
+        else if (tab == GalleryTab.Kept && keptCardsCache != null)
+        {
+            // Snapshot to a local: reading the nullable field after ApplyTabVisibility()
+            // would lose the compiler's not-null flow state (fields reset across calls).
+            List<GalleryCard> keptCache = keptCardsCache;
+            ApplyTabVisibility();
+            AttachCachedHistoryTab(KeptPanel, keptCache);
+            SetStatus("Kept tab: " + keptCache.Count + " item(s) (cached).");
+        }
+        else if (tab == GalleryTab.Discarded && discardedCardsCache != null)
+        {
+            List<GalleryCard> discardedCache = discardedCardsCache;
+            ApplyTabVisibility();
+            AttachCachedHistoryTab(DiscardedPanel, discardedCache);
+            SetStatus("Discarded tab: " + discardedCache.Count + " item(s) (cached).");
+        }
         else
         {
             ApplyTabVisibility();
@@ -1696,6 +1900,7 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
         CloseViewer();
         DisposeAllCardMedia();
         ClearHistoryTabPanels(disposeMedia: true);
+        InvalidateHistoryTabCaches();
         try
         {
             history.SaveToFile(settings.HistoryDirectory);

@@ -85,6 +85,9 @@ public sealed class AppSettings
     /// <summary>Video playback volume used by the viewer (0.0–1.0); muted by default so gallery browsing stays quiet.</summary>
     public double VideoPlaybackVolume { get; set; } = 0.0;
 
+    /// <summary>Viewer: when true, smaller graphics are zoomed in so their height fills the display window.</summary>
+    public bool AlwaysFitToWindow { get; set; } = false;
+
     public List<string> ImageExtensions { get; set; } = new List<string>
     {
         ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff"
