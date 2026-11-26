@@ -170,7 +170,8 @@ public sealed class AnimatedGifPlayer
         int hundredths = DefaultDelayHundredths;
         try
         {
-            object? rawDelay = frame.Metadata?.GetQuery("/grctlext/Delay");
+            BitmapMetadata? metadata = frame.Metadata as BitmapMetadata;
+            object? rawDelay = metadata?.GetQuery("/grctlext/Delay");
             if (rawDelay is ushort declaredDelay)
             {
                 hundredths = declaredDelay;
