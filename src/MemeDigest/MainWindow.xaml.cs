@@ -67,10 +67,30 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
     private bool isSeekDragging;
 
+    /// <summary>true once playback stopped on the last frame — a Play press must rewind before it plays.</summary>
+    private bool isVideoEnded;
+
+    /// <summary>Set while a MediaEnded notification comes from our own restart/stop, not from playback finishing.</summary>
+    private bool suppressMediaEnded;
+
+    /// <summary>Background file read-ahead for the meme on screen plus the next one; cancelled on every switch.</summary>
+    private CancellationTokenSource? viewerPrefetchCancellation;
+
     /// <summary>Set while the slider is updated from playback so ValueChanged does not echo back a seek.</summary>
     private bool suppressSeekSliderEvents;
 
     private readonly System.Windows.Threading.DispatcherTimer viewerClock = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
+
+    // ── Animated GIF state ──
+
+    private AnimatedGifPlayer? viewerGif;
+
+    private int viewerGifFrameIndex;
+
+    /// <summary>Bumped per GIF open so a decode that finishes late cannot paint over a newer meme.</summary>
+    private int viewerGifLoadVersion;
+
+    private readonly System.Windows.Threading.DispatcherTimer viewerGifClock = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
 
     // ── Tab state ──
 
@@ -108,10 +128,12 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
         history = UserHistory.LoadFromFile(settings.HistoryDirectory, settings.CurrentUserProfile);
         history.CollapseToLatestState();
         viewerClock.Tick += ViewerClock_Tick;
+        viewerGifClock.Tick += ViewerGifClock_Tick;
         ProfileComboBox.ItemsSource = settings.UserProfiles;
         ProfileComboBox.SelectedItem = settings.CurrentUserProfile;
         DrawCountBox.Text = settings.DrawCount.ToString(System.Globalization.CultureInfo.InvariantCulture);
         ViewerFitToWindowCheckBox.IsChecked = settings.AlwaysFitToWindow;
+        ViewerLoopCheckBox.IsChecked = settings.LoopVideos;
         UpdateTitle();
         RefreshHistorySummary();
         UpdateExportButtonStates();
@@ -488,7 +510,11 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
     // ── Replacement after discard/keep/move ──
 
-    private async Task ReplaceConsumedCardsAsync()
+    /// <summary>
+    /// Refills every placeholder slot in the drawer list with a fresh random meme.
+    /// `announce` is false when the caller writes its own status (keep/discard in place).
+    /// </summary>
+    private async Task ReplaceConsumedCardsAsync(bool announce = true)
     {
         int slotsToRefill = 0;
         HashSet<string> currentlyDisplayed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -528,7 +554,11 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
         if (replacements.Count == 0)
         {
-            SetStatus("Library exhausted — no unseen memes left to refill.");
+            if (announce)
+            {
+                SetStatus("Library exhausted — no unseen memes left to refill.");
+            }
+
             return;
         }
 
@@ -552,7 +582,10 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
         RebuildGalleryPanel();
 
         GalleryHeaderTextBlock.Text = GalleryHeaderTemplate();
-        SetStatus("Replaced " + replacementIndex + " empty slot" + (replacementIndex == 1 ? string.Empty : "s") + " with new random memes.");
+        if (announce)
+        {
+            SetStatus("Replaced " + replacementIndex + " empty slot" + (replacementIndex == 1 ? string.Empty : "s") + " with new random memes.");
+        }
     }
 
     /// <summary>
@@ -656,8 +689,7 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
         DispatchThumbnailJobs(targetPanel);
 
-        targetHeader.Text = (state == MemeHistoryState.Picked ? "Kept: " : "Discarded: ") + targetCards.Count
-            + " meme" + (targetCards.Count == 1 ? string.Empty : "s") + " — tick, then Reset selected returns them to the drawer pool";
+        targetHeader.Text = HistoryHeaderText(state, targetCards.Count);
         UpdateExportButtonStates();
     }
 
@@ -756,6 +788,7 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
         ViewerOverlay.Focus();
         ViewerCaptionTextBlock.Text = card.Media.RelativePath + "   [" + (viewerCardIndex + 1) + "/" + cards.Count + "]" + (card.IsSelected ? "   ✓ selected" : string.Empty);
         ShowViewerMedia(card.Media);
+        StartViewerPrefetch(cards, viewerCardIndex);
     }
 
     /// <summary>Applies the "Always fit to window" mode to the viewer image
@@ -783,54 +816,156 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
     private void ShowViewerMedia(MediaFileInfo media)
     {
         ViewerMediaErrorTextBlock.Visibility = Visibility.Collapsed;
+        StopViewerGif();
         ViewerImage.Source = null;
         ViewerImage.Visibility = Visibility.Collapsed;
         StopViewerClock();
         StopViewerVideo();
+        HideViewerVideoControls();
 
         try
         {
             if (media.Kind == MediaKind.Image)
             {
-                BitmapImage fullImage = new BitmapImage();
-                fullImage.BeginInit();
-                fullImage.UriSource = new Uri(media.AbsolutePath, UriKind.Absolute);
-                fullImage.CacheOption = BitmapCacheOption.OnLoad;
-                fullImage.EndInit();
-                fullImage.Freeze();
-                ViewerImage.Source = fullImage;
-                ApplyViewerFitMode();
-                ViewerImage.Visibility = Visibility.Visible;
-                ViewerPlayPauseButton.Visibility = Visibility.Collapsed;
-                ViewerSeekSlider.Visibility = Visibility.Collapsed;
-                ViewerTimeTextBlock.Visibility = Visibility.Collapsed;
-                ViewerMuteButton.Visibility = Visibility.Collapsed;
-                ViewerVolumeSlider.Visibility = Visibility.Collapsed;
+                if (IsAnimatedGifFile(media.AbsolutePath))
+                {
+                    ShowViewerGif(media);
+                }
+                else
+                {
+                    ShowViewerImage(media);
+                }
             }
             else
             {
-                suppressSeekSliderEvents = true;
-                ViewerSeekSlider.Value = 0;
-                ViewerSeekSlider.Maximum = 100;
-                suppressSeekSliderEvents = false;
-                ViewerTimeTextBlock.Text = "00:00 / 00:00";
-                ViewerPlayPauseButton.Visibility = Visibility.Visible;
-                ViewerPlayPauseButton.Content = "⏸ Pause";
-                ViewerSeekSlider.Visibility = Visibility.Visible;
-                ViewerTimeTextBlock.Visibility = Visibility.Visible;
-                ViewerMuteButton.Visibility = Visibility.Visible;
-                ViewerVolumeSlider.Visibility = Visibility.Visible;
-                ViewerVideo.Volume = ClampVolume(settings.VideoPlaybackVolume);
-                ViewerVideo.Visibility = Visibility.Visible;
-                isVideoPlaying = true;
-                ViewerVideo.Source = new Uri(media.AbsolutePath, UriKind.Absolute);
-                ViewerVideo.Play();
+                ShowViewerVideo(media);
             }
         }
         catch (Exception exception)
         {
             ShowViewerMediaError("Cannot open " + Path.GetFileName(media.AbsolutePath) + Environment.NewLine + exception.Message);
         }
+    }
+
+    /// <summary>GIF extensions never animate through BitmapImage — they go through the frame player instead.</summary>
+    private static bool IsAnimatedGifFile(string absolutePath)
+    {
+        return absolutePath.EndsWith(".gif", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void ShowViewerImage(MediaFileInfo media)
+    {
+        BitmapImage fullImage = new BitmapImage();
+        fullImage.BeginInit();
+        fullImage.UriSource = new Uri(media.AbsolutePath, UriKind.Absolute);
+        fullImage.CacheOption = BitmapCacheOption.OnLoad;
+        fullImage.EndInit();
+        fullImage.Freeze();
+        ViewerImage.Source = fullImage;
+        ApplyViewerFitMode();
+        ViewerImage.Visibility = Visibility.Visible;
+    }
+
+    /// <summary>
+    /// Starts animated-GIF playback. Decoding runs off the UI thread (a 20 MB GIF would
+    /// otherwise freeze the window), and the frame timer loops the animation forever.
+    /// </summary>
+    private void ShowViewerGif(MediaFileInfo media)
+    {
+        int loadVersion = ++viewerGifLoadVersion;
+        ViewerImage.Visibility = Visibility.Visible;
+        ApplyViewerFitMode();
+        _ = LoadViewerGifAsync(media.AbsolutePath, loadVersion);
+    }
+
+    private async Task LoadViewerGifAsync(string absolutePath, int loadVersion)
+    {
+        AnimatedGifPlayer? player = await Task.Run(() => AnimatedGifPlayer.TryLoad(absolutePath));
+        if (loadVersion != viewerGifLoadVersion)
+        {
+            // Another meme was opened while this GIF was still decoding.
+            return;
+        }
+
+        if (player == null)
+        {
+            ShowViewerMediaError("Cannot decode " + Path.GetFileName(absolutePath) + Environment.NewLine + "(corrupt GIF, or an animated WebP renamed to .gif)");
+            return;
+        }
+
+        viewerGif = player;
+        viewerGifFrameIndex = 0;
+        ViewerImage.Source = player.GetFrame(0);
+        ViewerImage.Visibility = Visibility.Visible;
+        ApplyViewerFitMode();
+
+        if (player.IsAnimated)
+        {
+            viewerGifClock.Interval = player.GetFrameDelay(0);
+            viewerGifClock.Start();
+        }
+    }
+
+    private void ViewerGifClock_Tick(object? sender, EventArgs eventArgs)
+    {
+        AnimatedGifPlayer? player = viewerGif;
+        if (player == null || player.FrameCount == 0)
+        {
+            viewerGifClock.Stop();
+            return;
+        }
+
+        viewerGifFrameIndex = (viewerGifFrameIndex + 1) % player.FrameCount;
+        ViewerImage.Source = player.GetFrame(viewerGifFrameIndex);
+        viewerGifClock.Interval = player.GetFrameDelay(viewerGifFrameIndex);
+    }
+
+    private void StopViewerGif()
+    {
+        viewerGifLoadVersion++;
+        viewerGifClock.Stop();
+        viewerGif = null;
+        viewerGifFrameIndex = 0;
+    }
+
+    private void ShowViewerVideo(MediaFileInfo media)
+    {
+        suppressSeekSliderEvents = true;
+        ViewerSeekSlider.Value = 0;
+        ViewerSeekSlider.Maximum = 100;
+        suppressSeekSliderEvents = false;
+        ViewerTimeTextBlock.Text = "Loading…";
+        ViewerPlayPauseButton.Content = "⏸ Pause";
+        ViewerPlayPauseButton.Visibility = Visibility.Visible;
+        ViewerSeekSlider.Visibility = Visibility.Visible;
+        ViewerTimeTextBlock.Visibility = Visibility.Visible;
+        ViewerMuteButton.Visibility = Visibility.Visible;
+        ViewerVolumeSlider.Visibility = Visibility.Visible;
+
+        double volume = ClampVolume(settings.VideoPlaybackVolume);
+        ViewerVideo.Volume = volume;
+        ViewerVolumeSlider.Value = volume;
+        ViewerMuteButton.Content = volume <= 0.0001 ? "🔇" : "🔊";
+
+        isVideoEnded = false;
+        isVideoPlaying = true;
+        ViewerVideo.Visibility = Visibility.Visible;
+
+        // Scrubbing stays off until the media is open: with it on, MediaElement prepares a
+        // seek index before it renders, which is what leaves long clips sitting on a black
+        // frame. MediaOpened switches it back on, so seeking afterwards still works.
+        ViewerVideo.ScrubbingEnabled = false;
+        ViewerVideo.Source = new Uri(media.AbsolutePath, UriKind.Absolute);
+        ViewerVideo.Play();
+    }
+
+    private void HideViewerVideoControls()
+    {
+        ViewerPlayPauseButton.Visibility = Visibility.Collapsed;
+        ViewerSeekSlider.Visibility = Visibility.Collapsed;
+        ViewerTimeTextBlock.Visibility = Visibility.Collapsed;
+        ViewerMuteButton.Visibility = Visibility.Collapsed;
+        ViewerVolumeSlider.Visibility = Visibility.Collapsed;
     }
 
     private void ShowViewerMediaError(string message)
@@ -842,6 +977,7 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
     private void CloseViewer()
     {
         StopViewerClock();
+        StopViewerGif();
         StopViewerVideo();
         ViewerImage.Source = null;
         ViewerOverlay.Visibility = Visibility.Collapsed;
@@ -851,11 +987,113 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
     private void StopViewerVideo()
     {
         isVideoPlaying = false;
+        isVideoEnded = false;
+        suppressMediaEnded = false;
         isSeekDragging = false;
-        ViewerVideo.Stop();
-        ViewerVideo.Close();
+        CancelViewerPrefetch();
+
+        try
+        {
+            ViewerVideo.Stop();
+            ViewerVideo.Close();
+        }
+        catch (Exception)
+        {
+            // Closing a MediaElement that never opened a media is harmless noise.
+        }
+
         ViewerVideo.Source = null;
         ViewerVideo.Visibility = Visibility.Collapsed;
+        ViewerTimeTextBlock.Text = "00:00 / 00:00";
+    }
+
+    // ── Viewer read-ahead ──
+
+    /// <summary>
+    /// Warms the OS file cache for the meme on screen and for the next one in the list.
+    /// MediaElement cannot start rendering until the demuxer has the data it needs, so a
+    /// cold read of a multi-hundred-MB clip shows up as a long "nothing happens" pause;
+    /// reading ahead in the background turns that into an ordinary buffered start.
+    /// </summary>
+    private void StartViewerPrefetch(List<GalleryCard> cards, int currentIndex)
+    {
+        CancelViewerPrefetch();
+
+        List<string> absolutePaths = new List<string>(2);
+        if (currentIndex >= 0 && currentIndex < cards.Count && !cards[currentIndex].IsPlaceholder)
+        {
+            absolutePaths.Add(cards[currentIndex].Media.AbsolutePath);
+        }
+
+        if (cards.Count > 1)
+        {
+            int nextIndex = (currentIndex + 1) % cards.Count;
+            if (nextIndex >= 0 && nextIndex < cards.Count && !cards[nextIndex].IsPlaceholder)
+            {
+                absolutePaths.Add(cards[nextIndex].Media.AbsolutePath);
+            }
+        }
+
+        if (absolutePaths.Count == 0)
+        {
+            return;
+        }
+
+        CancellationTokenSource cancellation = new CancellationTokenSource();
+        viewerPrefetchCancellation = cancellation;
+        CancellationToken token = cancellation.Token;
+        _ = Task.Run(() => PrefetchFilesIntoCache(absolutePaths, token));
+    }
+
+    private static void PrefetchFilesIntoCache(List<string> absolutePaths, CancellationToken token)
+    {
+        const int ChunkSize = 1 << 20;
+        byte[] buffer = new byte[ChunkSize];
+
+        foreach (string absolutePath in absolutePaths)
+        {
+            if (token.IsCancellationRequested)
+            {
+                return;
+            }
+
+            try
+            {
+                using (FileStream stream = new FileStream(absolutePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, ChunkSize, FileOptions.SequentialScan))
+                {
+                    while (!token.IsCancellationRequested)
+                    {
+                        if (stream.Read(buffer, 0, buffer.Length) <= 0)
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                // Read-ahead is an optimisation: locked or vanished files simply start cold.
+            }
+        }
+    }
+
+    private void CancelViewerPrefetch()
+    {
+        CancellationTokenSource? cancellation = viewerPrefetchCancellation;
+        viewerPrefetchCancellation = null;
+        if (cancellation == null)
+        {
+            return;
+        }
+
+        try
+        {
+            cancellation.Cancel();
+        }
+        catch (Exception)
+        {
+            // Already cancelled.
+        }
     }
 
     private void StopViewerClock()
@@ -941,6 +1179,11 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
         }
 
         GalleryCard card = cards[viewerCardIndex];
+        if (card.IsPlaceholder)
+        {
+            return;
+        }
+
         MediaFileInfo consumedMedia = card.Media;
         int consumedIndex = viewerCardIndex;
         GalleryTab viewerTab = activeTab;
@@ -952,49 +1195,11 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
             if (viewerTab == GalleryTab.Drawer)
             {
-                int cardIndex = FindCardIndex(card);
-
-                // List update first, then one-pass panel rebuild — never `Children[index] = ...`.
-                if (cardIndex >= 0)
-                {
-                    DisposeCardMedia(card);
-                    galleryCards[cardIndex] = CreatePlaceholderCard();
-                    RebuildGalleryPanel();
-                }
-
-                RefreshHistorySummary();
-                UpdateExportButtonStates();
-
-                // Keep/discard should chain: advance straight to the next drawn meme.
-                int nextIndex = FindNextViewableIndex(consumedIndex);
-                if (nextIndex >= 0)
-                {
-                    viewerCardIndex = nextIndex;
-                    ShowViewerForCurrentIndex();
-                }
-                else
-                {
-                    CloseViewer();
-                    SetStatus("All memes in this batch were processed — press Draw for a fresh one.");
-                }
-
-                await ReplaceConsumedCardsAsync();
+                await ReplaceDrawerCardInPlaceAsync(card, consumedMedia, state);
             }
             else
             {
-                // History tab: the meme already has its state recorded; just move on.
-                RefreshHistorySummary();
-                int nextIndex = FindNextViewableIndex(consumedIndex);
-                if (nextIndex >= 0)
-                {
-                    viewerCardIndex = nextIndex;
-                    ShowViewerForCurrentIndex();
-                }
-                else
-                {
-                    CloseViewer();
-                    SetStatus("All memes in this tab were viewed.");
-                }
+                ReplaceHistoryCardInPlace(viewerTab, card, consumedMedia, consumedIndex, state);
             }
         }
         finally
@@ -1004,28 +1209,129 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
     }
 
     /// <summary>
-    /// First non-placeholder card searching forward from consumedIndex (wrapping);
-    /// -1 when nothing viewable remains.
+    /// Drawer keep/discard: the consumed meme's slot is refilled and the viewer STAYS on that
+    /// same index, so the replacement shows up where the old meme was instead of the viewer
+    /// also advancing to a different drawn meme.
     /// </summary>
-    private int FindNextViewableIndex(int consumedIndex)
+    private async Task ReplaceDrawerCardInPlaceAsync(GalleryCard consumedCard, MediaFileInfo consumedMedia, MemeHistoryState state)
     {
-        List<GalleryCard> cards = ActiveCards();
-        int totalCards = cards.Count;
-        if (totalCards == 0)
+        int cardIndex = FindCardIndex(consumedCard);
+        if (cardIndex >= 0)
         {
-            return -1;
+            DisposeCardMedia(consumedCard);
+            galleryCards[cardIndex] = CreatePlaceholderCard();
+            RebuildGalleryPanel();
         }
 
-        for (int offset = 1; offset <= totalCards; offset++)
+        await ReplaceConsumedCardsAsync(announce: false);
+
+        GalleryHeaderTextBlock.Text = GalleryHeaderTemplate();
+        RefreshHistorySummary();
+        UpdateExportButtonStates();
+
+        string decision = DescribeHistoryState(state);
+        string fileName = Path.GetFileName(consumedMedia.AbsolutePath);
+        if (viewerCardIndex >= 0 && viewerCardIndex < galleryCards.Count && !galleryCards[viewerCardIndex].IsPlaceholder)
         {
-            int index = (consumedIndex + offset) % totalCards;
-            if (!cards[index].IsPlaceholder)
+            // Same index, new meme: ShowViewerForCurrentIndex repaints the caption and media.
+            ShowViewerForCurrentIndex();
+            SetStatus(decision + ": " + fileName + " — slot refilled in place.");
+        }
+        else
+        {
+            CloseViewer();
+            SetStatus(decision + ": " + fileName + " — library exhausted, no unseen meme left to fill this slot.");
+        }
+    }
+
+    /// <summary>
+    /// Kept/Discarded tab keep/discard: the card only leaves the list when the recorded state
+    /// no longer matches the tab (keeping a kept meme, or discarding a discarded one, is a
+    /// no-op), and the viewer keeps its position instead of jumping ahead.
+    /// </summary>
+    private void ReplaceHistoryCardInPlace(GalleryTab tab, GalleryCard card, MediaFileInfo consumedMedia, int consumedIndex, MemeHistoryState state)
+    {
+        MemeHistoryState tabState = tab == GalleryTab.Kept ? MemeHistoryState.Picked : MemeHistoryState.Discarded;
+        string decision = DescribeHistoryState(state);
+        string fileName = Path.GetFileName(consumedMedia.AbsolutePath);
+        RefreshHistorySummary();
+
+        if (state == tabState)
+        {
+            ShowViewerForCurrentIndex();
+            SetStatus(decision + ": " + fileName + " — already recorded in this tab.");
+            return;
+        }
+
+        RemoveHistoryTabCardInPlace(tab, card, consumedIndex);
+        SetStatus(decision + ": " + fileName + " — moved out of this tab.");
+    }
+
+    /// <summary>
+    /// Drops one card from a history tab list and panel while the viewer keeps the same
+    /// position: whatever slid into the freed slot is shown next, and the tab caches are
+    /// rewritten so switching tabs cannot resurrect the removed card.
+    /// </summary>
+    private void RemoveHistoryTabCardInPlace(GalleryTab tab, GalleryCard card, int removedIndex)
+    {
+        List<GalleryCard> targetCards = tab == GalleryTab.Kept ? keptCards : discardedCards;
+        WrapPanel targetPanel = tab == GalleryTab.Kept ? KeptPanel : DiscardedPanel;
+        TextBlock targetHeader = tab == GalleryTab.Kept ? KeptHeaderTextBlock : DiscardedHeaderTextBlock;
+        MemeHistoryState tabState = tab == GalleryTab.Kept ? MemeHistoryState.Picked : MemeHistoryState.Discarded;
+
+        int index = -1;
+        for (int candidateIndex = 0; candidateIndex < targetCards.Count; candidateIndex++)
+        {
+            if (ReferenceEquals(targetCards[candidateIndex], card))
             {
-                return index;
+                index = candidateIndex;
+                break;
             }
         }
 
-        return -1;
+        if (index < 0)
+        {
+            CloseViewer();
+            return;
+        }
+
+        string relativePath = card.Media.RelativePath;
+        card.ReleaseMedia();
+        targetCards.RemoveAt(index);
+        targetPanel.Children.Remove(card);
+        historySelection.Remove(relativePath);
+
+        if (tab == GalleryTab.Kept)
+        {
+            keptCardsCache = new List<GalleryCard>(keptCards);
+        }
+        else
+        {
+            discardedCardsCache = new List<GalleryCard>(discardedCards);
+        }
+
+        targetHeader.Text = HistoryHeaderText(tabState, targetCards.Count);
+        UpdateExportButtonStates();
+
+        if (targetCards.Count == 0)
+        {
+            CloseViewer();
+            return;
+        }
+
+        viewerCardIndex = removedIndex >= targetCards.Count ? targetCards.Count - 1 : removedIndex;
+        ShowViewerForCurrentIndex();
+    }
+
+    private static string DescribeHistoryState(MemeHistoryState state)
+    {
+        return state == MemeHistoryState.Picked ? "❤ Kept" : "✕ Discarded";
+    }
+
+    private static string HistoryHeaderText(MemeHistoryState state, int cardCount)
+    {
+        return (state == MemeHistoryState.Picked ? "Kept: " : "Discarded: ") + cardCount
+            + " meme" + (cardCount == 1 ? string.Empty : "s") + " — tick, then Reset selected returns them to the drawer pool";
     }
 
     /// <summary>Keep/discard every currently-selected card in one pass (batch buttons in the export toolbar).</summary>
@@ -1212,6 +1518,51 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
         await Task.Run(() => history.SaveToFile(settings.HistoryDirectory));
     }
 
+    /// <summary>
+    /// Opens a random meme from the kept pile in the viewer — never the one already on
+    /// screen when the pile holds more than one meme.
+    /// </summary>
+    private async void RandomKeptButton_Click(object sender, RoutedEventArgs eventArgs)
+    {
+        if (activeTab != GalleryTab.Kept || isMutatingGallery)
+        {
+            return;
+        }
+
+        if (keptCards.Count == 0)
+        {
+            await LoadHistoryTabAsync();
+        }
+
+        List<int> viewableIndexes = new List<int>();
+        for (int index = 0; index < keptCards.Count; index++)
+        {
+            if (!keptCards[index].IsPlaceholder)
+            {
+                viewableIndexes.Add(index);
+            }
+        }
+
+        if (viewableIndexes.Count == 0)
+        {
+            SetStatus("No kept memes yet — press ❤ Keep in the viewer to build the pile.");
+            return;
+        }
+
+        int pickedIndex = viewableIndexes[random.Next(viewableIndexes.Count)];
+        int pickedPosition = viewableIndexes.IndexOf(pickedIndex);
+        if (viewableIndexes.Count > 1 && pickedIndex == viewerCardIndex)
+        {
+            pickedPosition = (pickedPosition + 1) % viewableIndexes.Count;
+            pickedIndex = viewableIndexes[pickedPosition];
+        }
+
+        viewerCardIndex = pickedIndex;
+        ShowViewerForCurrentIndex();
+        keptCards[pickedIndex].BringIntoView();
+        SetStatus("Random kept meme " + (pickedPosition + 1) + "/" + viewableIndexes.Count + ": " + Path.GetFileName(keptCards[pickedIndex].Media.AbsolutePath));
+    }
+
     private void ViewerCloseButton_Click(object sender, RoutedEventArgs eventArgs)
     {
         CloseViewer();
@@ -1220,6 +1571,15 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
     // ── Video player controls ──
 
     private void ViewerPlayPauseButton_Click(object sender, RoutedEventArgs eventArgs)
+    {
+        ToggleViewerPlayback();
+    }
+
+    /// <summary>
+    /// Single entry point for the button and the P shortcut. An ended video is rewound
+    /// first — Play() alone on an ended MediaElement does nothing on most decoders.
+    /// </summary>
+    private void ToggleViewerPlayback()
     {
         if (ViewerVideo.Visibility != Visibility.Visible || ViewerVideo.Source == null)
         {
@@ -1230,12 +1590,55 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
         {
             ViewerVideo.Pause();
             SetVideoPlaying(false);
+            return;
         }
-        else
+
+        if (isVideoEnded)
         {
+            RestartViewerVideoFromStart();
+            return;
+        }
+
+        ViewerVideo.Play();
+        SetVideoPlaying(true);
+    }
+
+    /// <summary>
+    /// Rewinds and resumes: Stop() resets Manual-mode playback to the start, the explicit
+    /// Position write covers decoders that keep reporting the end position, and the
+    /// suppress flag keeps the resulting late MediaEnded from re-arming the Replay state.
+    /// </summary>
+    private void RestartViewerVideoFromStart()
+    {
+        suppressMediaEnded = true;
+        try
+        {
+            ViewerVideo.Stop();
+            ViewerVideo.Position = TimeSpan.Zero;
             ViewerVideo.Play();
+            isVideoEnded = false;
             SetVideoPlaying(true);
         }
+        catch (Exception exception)
+        {
+            ViewerPlayPauseButton.Content = "▶ Replay";
+            SetStatus("Replay failed: " + exception.Message);
+        }
+        finally
+        {
+            suppressMediaEnded = false;
+        }
+    }
+
+    private void ViewerLoopCheckBox_CheckedChanged(object sender, RoutedEventArgs eventArgs)
+    {
+        if (settings == null)
+        {
+            return;
+        }
+
+        settings.LoopVideos = ViewerLoopCheckBox.IsChecked == true;
+        SaveSettings();
     }
 
     private void SetVideoPlaying(bool playing)
@@ -1254,17 +1657,44 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
 
     private void ViewerVideo_MediaOpened(object sender, RoutedEventArgs eventArgs)
     {
+        isVideoEnded = false;
+        // Scrubbing was disabled while the media opened (fast start); seeking needs it back.
+        ViewerVideo.ScrubbingEnabled = true;
+
         if (ViewerVideo.NaturalDuration.HasTimeSpan)
         {
             suppressSeekSliderEvents = true;
             ViewerSeekSlider.Maximum = ViewerVideo.NaturalDuration.TimeSpan.TotalSeconds;
             suppressSeekSliderEvents = false;
-            viewerClock.Start();
         }
+
+        TimeSpan duration = ViewerVideo.NaturalDuration.HasTimeSpan ? ViewerVideo.NaturalDuration.TimeSpan : TimeSpan.Zero;
+        ViewerTimeTextBlock.Text = FormatViewerTime(ViewerVideo.Position) + " / " + FormatViewerTime(duration);
+        SetVideoPlaying(isVideoPlaying);
     }
 
     private void ViewerVideo_MediaEnded(object sender, RoutedEventArgs eventArgs)
     {
+        if (suppressMediaEnded)
+        {
+            return;
+        }
+
+        // A Stop()/rewind can surface a late MediaEnded for the old position: only treat it
+        // as "finished" when playback really sits at the end of the media.
+        if (ViewerVideo.NaturalDuration.HasTimeSpan
+            && ViewerVideo.Position < ViewerVideo.NaturalDuration.TimeSpan - TimeSpan.FromMilliseconds(250))
+        {
+            return;
+        }
+
+        if (settings.LoopVideos)
+        {
+            RestartViewerVideoFromStart();
+            return;
+        }
+
+        isVideoEnded = true;
         SetVideoPlaying(false);
         ViewerPlayPauseButton.Content = "▶ Replay";
     }
@@ -1396,6 +1826,10 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
                 break;
             case Key.Space when !eventArgs.IsRepeat:
                 _ = MarkCurrentViewerCard(MemeHistoryState.Discarded);
+                eventArgs.Handled = true;
+                break;
+            case Key.P when !eventArgs.IsRepeat:
+                ToggleViewerPlayback();
                 eventArgs.Handled = true;
                 break;
             case Key.C when System.Windows.Input.Keyboard.Modifiers == ModifierKeys.Control:
@@ -1864,6 +2298,7 @@ public partial class MainWindow : Window, System.Windows.Forms.IWin32Window
         KeptPanelHost.Visibility = activeTab == GalleryTab.Kept ? Visibility.Visible : Visibility.Collapsed;
         DiscardedPanelHost.Visibility = activeTab == GalleryTab.Discarded ? Visibility.Visible : Visibility.Collapsed;
         ResetSelectedButton.Visibility = activeTab == GalleryTab.Drawer ? Visibility.Collapsed : Visibility.Visible;
+        RandomKeptButton.Visibility = activeTab == GalleryTab.Kept ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /// <summary>Card list of the active tab — viewer/selection logic routes through this.</summary>

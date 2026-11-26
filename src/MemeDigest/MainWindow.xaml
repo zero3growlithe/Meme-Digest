@@ -179,6 +179,7 @@
                 <RadioButton x:Name="KeptTabButton" Content="Kept Memes" GroupName="MainTabs" Style="{StaticResource DarkTabStyle}" Checked="KeptTabButton_Checked" />
                 <RadioButton x:Name="DiscardedTabButton" Content="Discarded Memes" GroupName="MainTabs" Style="{StaticResource DarkTabStyle}" Checked="DiscardedTabButton_Checked" />
                 <Button x:Name="ResetSelectedButton" Content="♻ Reset selected" Style="{StaticResource ToolBarButtonStyle}" Margin="16,0,0,0" Click="ResetSelectedButton_Click" ToolTip="Remove the selected memes from history so they can be drawn again" Visibility="Collapsed" />
+                <Button x:Name="RandomKeptButton" Content="🎲 Random kept" Style="{StaticResource ToolBarButtonStyle}" Margin="16,0,0,0" Click="RandomKeptButton_Click" ToolTip="Open a random meme from the kept pile in the viewer" Visibility="Collapsed" />
             </StackPanel>
         </Border>
 
@@ -250,7 +251,8 @@
                                 <Button x:Name="ViewerDiscardButton" Content="✕ Discard" Style="{StaticResource ToolBarButtonStyle}" Click="ViewerDiscardButton_Click" />
                                 <Button Content="Next ▶" Style="{StaticResource ToolBarButtonStyle}" Click="ViewerNextButton_Click" />
                                 <Rectangle Width="1" Margin="8,2" Fill="#FF3C3C4E" />
-                                <Button x:Name="ViewerPlayPauseButton" Content="⏸ Pause" Style="{StaticResource ToolBarButtonStyle}" Click="ViewerPlayPauseButton_Click" />
+                                <Button x:Name="ViewerPlayPauseButton" Content="⏸ Pause" Style="{StaticResource ToolBarButtonStyle}" Click="ViewerPlayPauseButton_Click" ToolTip="Play / pause the video (P)" />
+                                <CheckBox x:Name="ViewerLoopCheckBox" Content="🔁 Loop" Foreground="#FFB8B8C8" VerticalAlignment="Center" Margin="6,0" Checked="ViewerLoopCheckBox_CheckedChanged" Unchecked="ViewerLoopCheckBox_CheckedChanged" ToolTip="Restart the video automatically when it reaches the end" />
                                 <TextBlock x:Name="ViewerTimeTextBlock" Foreground="#FF8A8AA0" VerticalAlignment="Center" Margin="8,0,8,0" Text="00:00 / 00:00" />
                                 <Slider x:Name="ViewerSeekSlider" Width="220" Minimum="0" Maximum="100" IsMoveToPointEnabled="True" Thumb.DragStarted="ViewerSeekSlider_DragStarted" Thumb.DragCompleted="ViewerSeekSlider_DragCompleted" ValueChanged="ViewerSeekSlider_ValueChanged" />
                                 <Button x:Name="ViewerMuteButton" Content="🔊" Style="{StaticResource ToolBarButtonStyle}" Click="ViewerMuteButton_Click" />

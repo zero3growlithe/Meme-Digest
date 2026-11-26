@@ -88,6 +88,9 @@ public sealed class AppSettings
     /// <summary>Viewer: when true, smaller graphics are zoomed in so their height fills the display window.</summary>
     public bool AlwaysFitToWindow { get; set; } = false;
 
+    /// <summary>Viewer: when true, a finished video restarts from the beginning instead of stopping on its last frame.</summary>
+    public bool LoopVideos { get; set; } = false;
+
     public List<string> ImageExtensions { get; set; } = new List<string>
     {
         ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff"
