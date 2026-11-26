@@ -6,28 +6,33 @@ using System.Windows.Media.Imaging;
 namespace MemeDigest;
 
 /// <summary>
-/// Decoded animated GIF: the full frame list plus per-frame display delays, kept frozen so
+/// Decoded animated GIF: fully composited frames plus per-frame display delays, kept frozen so
 /// the viewer can hand single frames to an Image control on a timer.
-/// WPF's BitmapImage only ever renders frame 0 of an animation, which is why a plain
-/// BitmapImage source shows GIFs as a still picture — the caller steps through these frames.
+///
+/// Two WPF traps make the obvious implementation unusable:
+/// - BitmapImage only ever renders frame 0, so a plain image source shows a still picture.
+/// - GIF frames are deltas. Each frame paints only its own rectangle and tells the decoder how
+///   to dispose of it afterwards; WIC returns the raw frames without applying any of that, so
+///   drawing them directly shows the unpainted regions as black patches and turns delta frames
+///   into whole-black flashes. This class replays the GIF composition rules onto one canvas.
 /// </summary>
 public sealed class AnimatedGifPlayer
 {
     // ── Constants ──
 
-    /// <summary>GIFs that declare 0–1 hundredths of a second are drawn at 100 ms (browser behaviour).</summary>
+    /// <summary>GIFs declaring 0–1 hundredths per frame are drawn at 100 ms (browser behaviour).</summary>
     private const int MinimumDelayHundredths = 2;
 
     private const int DefaultDelayHundredths = 10;
 
-    /// <summary>Total decoded pixels allowed for one animation before frames get downscaled.</summary>
-    private const long AnimationPixelBudget = 400_000_000;
-
-    /// <summary>Single-frame pixel ceiling (roughly 1080p) before that frame gets downscaled.</summary>
+    /// <summary>Single-frame pixel ceiling (roughly 1080p) before frames get downscaled.</summary>
     private const long FramePixelBudget = 3_000_000;
 
-    /// <summary>Animations above this decoded size are used once but never cached.</summary>
-    private const long CacheablePixelBudget = 64_000_000;
+    /// <summary>Whole-animation pixel ceiling — frames are full-canvas bitmaps at 4 bytes each.</summary>
+    private const long AnimationPixelBudget = 40_000_000;
+
+    /// <summary>Animations above this decoded size are played once but never cached.</summary>
+    private const long CacheablePixelBudget = 6_000_000;
 
     private const int CacheCapacity = 4;
 
@@ -42,6 +47,37 @@ public sealed class AnimatedGifPlayer
     private readonly List<BitmapSource> frames;
 
     private readonly List<TimeSpan> delays;
+
+    // ── Nested types ──
+
+    /// <summary>Where one frame paints and how it must be disposed of afterwards.</summary>
+    private readonly struct GifFrameLayout
+    {
+        public GifFrameLayout(int left, int top, int width, int height, int disposal)
+        {
+            Left = left;
+            Top = top;
+            Width = width;
+            Height = height;
+            Disposal = disposal;
+        }
+
+        public int Left { get; }
+
+        public int Top { get; }
+
+        public int Width { get; }
+
+        public int Height { get; }
+
+        /// <summary>0 = unspecified, 1 = leave in place, 2 = restore background, 3 = restore previous.</summary>
+        public int Disposal { get; }
+
+        public bool RestoresCanvas
+        {
+            get { return Disposal == 2 || Disposal == 3; }
+        }
+    }
 
     // ── Construction ──
 
@@ -67,8 +103,9 @@ public sealed class AnimatedGifPlayer
     // ── Public API ──
 
     /// <summary>
-    /// Decodes the GIF at the given path (background-thread safe — frames come back frozen).
-    /// Returns null when the file cannot be decoded; a recent player is reused from the cache.
+    /// Decodes and composites the GIF at the given path (background-thread safe — everything
+    /// comes back frozen). Returns null when the file cannot be decoded; recent players are
+    /// reused from the cache.
     /// </summary>
     public static AnimatedGifPlayer? TryLoad(string absolutePath)
     {
@@ -86,7 +123,7 @@ public sealed class AnimatedGifPlayer
         {
             GifBitmapDecoder decoder = new GifBitmapDecoder(
                 new Uri(absolutePath, UriKind.Absolute),
-                BitmapCreateOptions.PreservePixelFormat,
+                BitmapCreateOptions.None,
                 BitmapCacheOption.OnLoad);
 
             if (decoder.Frames.Count == 0)
@@ -94,28 +131,42 @@ public sealed class AnimatedGifPlayer
                 return null;
             }
 
-            List<BitmapSource> decodedFrames = new List<BitmapSource>(decoder.Frames.Count);
-            List<TimeSpan> decodedDelays = new List<TimeSpan>(decoder.Frames.Count);
-            long totalPixels = 0;
+            int canvasWidth = 0;
+            int canvasHeight = 0;
             for (int frameIndex = 0; frameIndex < decoder.Frames.Count; frameIndex++)
             {
-                // Frames come back as BitmapFrame, which is the type that carries the GIF metadata.
                 BitmapFrame frame = decoder.Frames[frameIndex];
-                decodedFrames.Add(frame);
-                decodedDelays.Add(ReadFrameDelay(frame));
-                totalPixels += (long)frame.PixelWidth * frame.PixelHeight;
+                canvasWidth = Math.Max(canvasWidth, frame.PixelWidth);
+                canvasHeight = Math.Max(canvasHeight, frame.PixelHeight);
             }
 
-            double scale = ComputeScale(decodedFrames.Count, totalPixels);
-            bool isCacheable = totalPixels * scale * scale <= CacheablePixelBudget;
-
-            List<BitmapSource> scaledFrames = new List<BitmapSource>(decodedFrames.Count);
-            for (int frameIndex = 0; frameIndex < decodedFrames.Count; frameIndex++)
+            if (canvasWidth <= 0 || canvasHeight <= 0)
             {
-                scaledFrames.Add(scale < 1.0 ? Downscale(decodedFrames[frameIndex], scale) : FreezeClone(decodedFrames[frameIndex]));
+                return null;
             }
 
-            AnimatedGifPlayer player = new AnimatedGifPlayer(scaledFrames, decodedDelays);
+            // Downscale BEFORE compositing: the per-pixel blend then runs on the smaller canvas,
+            // which keeps a 100-frame 1080p GIF from costing seconds of CPU and hundreds of MB.
+            long totalPixels = (long)canvasWidth * canvasHeight * decoder.Frames.Count;
+            double scale = ComputeScale(decoder.Frames.Count, totalPixels);
+            int scaledWidth = scale < 1.0 ? Math.Max(1, (int)Math.Round(canvasWidth * scale)) : canvasWidth;
+            int scaledHeight = scale < 1.0 ? Math.Max(1, (int)Math.Round(canvasHeight * scale)) : canvasHeight;
+
+            List<TimeSpan> decodedDelays = new List<TimeSpan>(decoder.Frames.Count);
+            for (int frameIndex = 0; frameIndex < decoder.Frames.Count; frameIndex++)
+            {
+                decodedDelays.Add(ReadFrameDelay(decoder.Frames[frameIndex]));
+            }
+
+            List<BitmapSource> compositedFrames = CompositeFrames(decoder, canvasWidth, scaledWidth, scaledHeight, scale);
+            if (compositedFrames.Count == 0)
+            {
+                return null;
+            }
+
+            bool isCacheable = (long)scaledWidth * scaledHeight * compositedFrames.Count <= CacheablePixelBudget;
+
+            AnimatedGifPlayer player = new AnimatedGifPlayer(compositedFrames, decodedDelays);
             if (isCacheable)
             {
                 StoreInCache(cacheKey, player);
@@ -163,7 +214,220 @@ public sealed class AnimatedGifPlayer
         return delays[wrappedIndex];
     }
 
-    // ── Decoding helpers ──
+    // ── Composition ──
+
+    /// <summary>
+    /// Replays the GIF composition rules over one premultiplied-BGRA canvas. Frames that leave
+    /// the canvas alone simply accumulate (that is how delta frames build an image), while
+    /// disposal 2/3 restore the pixels the frame covered before the next frame paints.
+    ///
+    /// Disposal 2 is treated as "restore the previous pixels" rather than "clear the rectangle
+    /// to the background colour": GIF backgrounds are transparent in practice, where the two
+    /// rules are identical, and it guarantees a wrong or missing image-descriptor rectangle can
+    /// never punch a black hole into the animation.
+    /// </summary>
+    private static List<BitmapSource> CompositeFrames(GifBitmapDecoder decoder, int canvasWidth, int scaledWidth, int scaledHeight, double scale)
+    {
+        int stride = scaledWidth * 4;
+        byte[] canvas = new byte[stride * scaledHeight];
+        byte[]? restoreBuffer = null;
+        GifFrameLayout? previousLayout = null;
+
+        List<BitmapSource> composited = new List<BitmapSource>(decoder.Frames.Count);
+        for (int frameIndex = 0; frameIndex < decoder.Frames.Count; frameIndex++)
+        {
+            // Undo the previous frame when it asked to be restored before this frame paints.
+            if (previousLayout != null && previousLayout.Value.RestoresCanvas && restoreBuffer != null)
+            {
+                RestoreRect(canvas, stride, restoreBuffer, previousLayout.Value, scaledWidth, scaledHeight);
+            }
+
+            BitmapFrame frame = decoder.Frames[frameIndex];
+            BitmapSource sourcePixels = EnsurePremultiplied(frame);
+            if (scale < 1.0)
+            {
+                sourcePixels = Downscale(sourcePixels, scale);
+            }
+
+            GifFrameLayout layout = BuildLayout(frame, sourcePixels, canvasWidth, scaledWidth, scaledHeight);
+
+            // Snapshot what this frame is about to cover, for use if it asks to be restored.
+            restoreBuffer = layout.RestoresCanvas
+                ? CopyRect(canvas, stride, layout, scaledWidth, scaledHeight)
+                : null;
+            previousLayout = layout;
+
+            BlendFrame(canvas, stride, sourcePixels, layout, scaledWidth, scaledHeight);
+
+            // Hand every frame its own copy of the pixels — BitmapSource.Create may not keep its own.
+            byte[] framePixels = (byte[])canvas.Clone();
+            BitmapSource composedFrame = BitmapSource.Create(scaledWidth, scaledHeight, 96, 96, PixelFormats.Pbgra32, null, framePixels, stride);
+            composedFrame.Freeze();
+            composited.Add(composedFrame);
+        }
+
+        return composited;
+    }
+
+    private static GifFrameLayout BuildLayout(BitmapFrame frame, BitmapSource sourcePixels, int canvasWidth, int scaledWidth, int scaledHeight)
+    {
+        double coordinateScale = canvasWidth > 0 ? (double)scaledWidth / canvasWidth : 1.0;
+        int declaredLeft = ScaleCoordinate(ReadMetadataInt(frame, "/imgdesc/Left"), coordinateScale);
+        int declaredTop = ScaleCoordinate(ReadMetadataInt(frame, "/imgdesc/Top"), coordinateScale);
+
+        int frameWidth = sourcePixels.PixelWidth;
+        int frameHeight = sourcePixels.PixelHeight;
+
+        // WIC expands frames to the logical screen, so their offsets are already baked in and
+        // only genuinely smaller (sub-rect) frames are drawn at their declared position.
+        bool isFullScreenFrame = frameWidth >= scaledWidth && frameHeight >= scaledHeight;
+        int left = isFullScreenFrame ? 0 : Math.Max(0, declaredLeft);
+        int top = isFullScreenFrame ? 0 : Math.Max(0, declaredTop);
+
+        return new GifFrameLayout(left, top, frameWidth, frameHeight, ReadMetadataInt(frame, "/grctlext/Disposal"));
+    }
+
+    private static int ScaleCoordinate(int value, double scale)
+    {
+        if (value <= 0)
+        {
+            return 0;
+        }
+
+        int scaledValue = (int)Math.Round(value * scale);
+        return scaledValue < 1 ? 1 : scaledValue;
+    }
+
+    private static BitmapSource EnsurePremultiplied(BitmapSource frame)
+    {
+        if (frame.Format == PixelFormats.Pbgra32)
+        {
+            return frame;
+        }
+
+        // Straight-alpha or palette frames are converted once, premultiplied for clean blending.
+        FormatConvertedBitmap converted = new FormatConvertedBitmap(frame, PixelFormats.Pbgra32, null, 0);
+        if (converted.CanFreeze)
+        {
+            converted.Freeze();
+        }
+
+        return converted;
+    }
+
+    private static BitmapSource Downscale(BitmapSource frame, double scale)
+    {
+        TransformedBitmap scaledFrame = new TransformedBitmap(frame, new ScaleTransform(scale, scale));
+        if (scaledFrame.CanFreeze)
+        {
+            scaledFrame.Freeze();
+        }
+
+        return scaledFrame;
+    }
+
+    /// <summary>Premultiplied source-over blend of one frame onto the canvas; transparent pixels keep what is already there.</summary>
+    private static void BlendFrame(byte[] canvas, int stride, BitmapSource frame, GifFrameLayout layout, int canvasWidth, int canvasHeight)
+    {
+        int frameWidth = frame.PixelWidth;
+        int frameHeight = frame.PixelHeight;
+        if (frameWidth <= 0 || frameHeight <= 0)
+        {
+            return;
+        }
+
+        int frameStride = frameWidth * 4;
+        byte[] framePixels = new byte[frameStride * frameHeight];
+        frame.CopyPixels(framePixels, frameStride, 0);
+
+        for (int y = 0; y < frameHeight; y++)
+        {
+            int canvasY = layout.Top + y;
+            if (canvasY < 0 || canvasY >= canvasHeight)
+            {
+                continue;
+            }
+
+            int frameRow = y * frameStride;
+            int canvasRow = canvasY * stride;
+            for (int x = 0; x < frameWidth; x++)
+            {
+                int canvasX = layout.Left + x;
+                if (canvasX < 0 || canvasX >= canvasWidth)
+                {
+                    continue;
+                }
+
+                int frameOffset = frameRow + (x * 4);
+                byte sourceAlpha = framePixels[frameOffset + 3];
+                if (sourceAlpha == 0)
+                {
+                    // Fully transparent: the pixels already on the canvas stay visible.
+                    continue;
+                }
+
+                int canvasOffset = canvasRow + (canvasX * 4);
+                if (sourceAlpha == 255)
+                {
+                    canvas[canvasOffset] = framePixels[frameOffset];
+                    canvas[canvasOffset + 1] = framePixels[frameOffset + 1];
+                    canvas[canvasOffset + 2] = framePixels[frameOffset + 2];
+                    canvas[canvasOffset + 3] = 255;
+                    continue;
+                }
+
+                int inverseAlpha = 255 - sourceAlpha;
+                canvas[canvasOffset] = CompositeChannel(framePixels[frameOffset], canvas[canvasOffset], inverseAlpha);
+                canvas[canvasOffset + 1] = CompositeChannel(framePixels[frameOffset + 1], canvas[canvasOffset + 1], inverseAlpha);
+                canvas[canvasOffset + 2] = CompositeChannel(framePixels[frameOffset + 2], canvas[canvasOffset + 2], inverseAlpha);
+                canvas[canvasOffset + 3] = CompositeChannel(sourceAlpha, canvas[canvasOffset + 3], inverseAlpha);
+            }
+        }
+    }
+
+    private static byte CompositeChannel(byte source, byte destination, int inverseAlpha)
+    {
+        int blended = source + ((destination * inverseAlpha) / 255);
+        return blended > 255 ? (byte)255 : (byte)blended;
+    }
+
+    private static byte[] CopyRect(byte[] canvas, int stride, GifFrameLayout layout, int canvasWidth, int canvasHeight)
+    {
+        GetClippedRect(layout, canvasWidth, canvasHeight, out int left, out int top, out int width, out int height);
+        byte[] buffer = new byte[Math.Max(0, width * height * 4)];
+        for (int y = 0; y < height; y++)
+        {
+            Array.Copy(canvas, ((top + y) * stride) + (left * 4), buffer, y * width * 4, width * 4);
+        }
+
+        return buffer;
+    }
+
+    private static void RestoreRect(byte[] canvas, int stride, byte[] restoreBuffer, GifFrameLayout layout, int canvasWidth, int canvasHeight)
+    {
+        GetClippedRect(layout, canvasWidth, canvasHeight, out int left, out int top, out int width, out int height);
+        int requiredBytes = width * height * 4;
+        if (requiredBytes <= 0 || restoreBuffer.Length < requiredBytes)
+        {
+            // The rectangle changed shape since the snapshot: nothing safe to restore.
+            return;
+        }
+
+        for (int y = 0; y < height; y++)
+        {
+            Array.Copy(restoreBuffer, y * width * 4, canvas, ((top + y) * stride) + (left * 4), width * 4);
+        }
+    }
+
+    private static void GetClippedRect(GifFrameLayout layout, int canvasWidth, int canvasHeight, out int left, out int top, out int width, out int height)
+    {
+        left = Math.Max(0, Math.Min(layout.Left, canvasWidth));
+        top = Math.Max(0, Math.Min(layout.Top, canvasHeight));
+        width = Math.Max(0, Math.Min(layout.Width, canvasWidth - left));
+        height = Math.Max(0, Math.Min(layout.Height, canvasHeight - top));
+    }
+
+    // ── Metadata ──
 
     private static TimeSpan ReadFrameDelay(BitmapFrame frame)
     {
@@ -194,6 +458,38 @@ public sealed class AnimatedGifPlayer
         return TimeSpan.FromMilliseconds(hundredths * 10);
     }
 
+    /// <summary>Reads an integer GIF metadata query, 0 when the query is absent or unreadable.</summary>
+    private static int ReadMetadataInt(BitmapFrame frame, string query)
+    {
+        try
+        {
+            BitmapMetadata? metadata = frame.Metadata as BitmapMetadata;
+            object? rawValue = metadata?.GetQuery(query);
+            if (rawValue == null)
+            {
+                return 0;
+            }
+
+            if (rawValue is ushort unsignedShortValue)
+            {
+                return unsignedShortValue;
+            }
+
+            if (rawValue is byte byteValue)
+            {
+                return byteValue;
+            }
+
+            return Convert.ToInt32(rawValue, System.Globalization.CultureInfo.InvariantCulture);
+        }
+        catch (Exception)
+        {
+            return 0;
+        }
+    }
+
+    // ── Scaling ──
+
     private static double ComputeScale(int frameCount, long totalPixels)
     {
         if (frameCount <= 0)
@@ -215,26 +511,6 @@ public sealed class AnimatedGifPlayer
         }
 
         return scale;
-    }
-
-    private static BitmapSource FreezeClone(BitmapSource frame)
-    {
-        if (frame.CanFreeze)
-        {
-            frame.Freeze();
-        }
-
-        BitmapSource detachedFrame = frame.Clone();
-        detachedFrame.Freeze();
-        return detachedFrame;
-    }
-
-    private static BitmapSource Downscale(BitmapSource frame, double scale)
-    {
-        BitmapSource frozenFrame = FreezeClone(frame);
-        TransformedBitmap scaledFrame = new TransformedBitmap(frozenFrame, new ScaleTransform(scale, scale));
-        scaledFrame.Freeze();
-        return scaledFrame;
     }
 
     // ── Cache ──
